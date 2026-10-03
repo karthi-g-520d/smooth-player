@@ -1,12 +1,9 @@
 *.iml
 .gradle
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+# The whole directory is machine-local IDE state (deployment targets, local Gradle JVM args,
+# compiler settings tied to this install of Android Studio). Nothing in it is meant to be shared.
+/.idea/
 .DS_Store
 build/
 /captures
