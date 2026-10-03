@@ -24,3 +24,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "smoothplayer"
 include(":app")
+include(":engine:api")
+include(":engine:impl")
+include(":feature:player")

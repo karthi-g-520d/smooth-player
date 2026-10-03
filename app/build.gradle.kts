@@ -33,6 +33,8 @@ android {
 }
 
 dependencies {
+    implementation(project(":feature:player"))
+    implementation(project(":engine:impl"))
     implementation(libs.androidx.activity)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.constraintlayout)
