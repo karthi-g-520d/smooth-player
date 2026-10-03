@@ -20,4 +20,5 @@ android {
 
 dependencies {
     api(project(":engine:api"))
+    testImplementation(libs.junit)
 }

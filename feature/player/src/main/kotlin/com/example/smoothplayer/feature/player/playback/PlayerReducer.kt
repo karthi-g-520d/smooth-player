@@ -17,6 +17,7 @@ internal object PlayerReducer {
         is EngineState.Ready -> copy(phase = PlayerUiState.Phase.Ready, videoInfo = engineState.info, error = null)
         EngineState.Playing -> copy(phase = PlayerUiState.Phase.Playing)
         EngineState.Paused -> copy(phase = PlayerUiState.Phase.Paused)
+        EngineState.Ended -> copy(phase = PlayerUiState.Phase.Ended)
         is EngineState.Failed -> copy(phase = PlayerUiState.Phase.Failed, error = engineState.error)
     }
 }

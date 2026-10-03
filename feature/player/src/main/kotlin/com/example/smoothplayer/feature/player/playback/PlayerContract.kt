@@ -10,7 +10,7 @@ public data class PlayerUiState(
     val videoInfo: VideoInfo? = null,
     val error: EngineError? = null,
 ) {
-    public enum class Phase { Idle, Preparing, Ready, Playing, Paused, Failed }
+    public enum class Phase { Idle, Preparing, Ready, Playing, Paused, Ended, Failed }
 }
 
 public sealed interface PlayerEvent {

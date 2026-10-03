@@ -11,11 +11,17 @@
         android:layout_height="wrap_content"
         android:text="@string/player_choose_file" />
 
+    <SurfaceView
+        android:id="@+id/videoSurface"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="2"
+        android:layout_marginTop="@dimen/dimen_player_spacing" />
+
     <TextView
         android:id="@+id/infoText"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
+        android:layout_height="wrap_content"
         android:layout_marginTop="@dimen/dimen_player_spacing"
         android:layout_marginBottom="@dimen/dimen_player_spacing"
         android:fontFamily="monospace"

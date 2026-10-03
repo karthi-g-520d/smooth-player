@@ -1,6 +1,7 @@
 package com.example.smoothplayer.feature.player.playback
 
 import android.os.Bundle
+import android.view.SurfaceHolder
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
@@ -18,7 +19,7 @@ import kotlinx.coroutines.launch
 private const val VIDEO_MIME_FILTER = "video/*"
 
 /**
- * Thin view: launches the file picker, forwards clicks as events and renders [PlayerUiState].
+ * Thin view: launches the file picker, forwards clicks and surface events, and renders [PlayerUiState].
  *
  * See the ValidFragment note on [com.example.smoothplayer.feature.player.capability.CapabilityFragment]:
  * the same custom FragmentFactory covers this fragment too.
@@ -38,10 +39,24 @@ public class PlayerFragment(
         uri?.let { viewModel.onEvent(PlayerEvent.FileChosen(it.toString())) }
     }
 
+    // Surface events go to the view model's render target, not to a new one. See PlayerViewModel.
+    private val surfaceCallback = object : SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: SurfaceHolder) = Unit
+
+        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+            viewModel.renderTarget.onSurfaceChanged(holder.surface, width, height)
+        }
+
+        override fun surfaceDestroyed(holder: SurfaceHolder) {
+            viewModel.renderTarget.onSurfaceDestroyed()
+        }
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         _binding = FragmentPlayerBinding.bind(view)
         bindListeners()
+        binding.videoSurface.holder.addCallback(surfaceCallback)
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch { viewModel.uiState.collect(::render) }
@@ -55,13 +70,14 @@ public class PlayerFragment(
         infoText.text = when (state.phase) {
             PlayerUiState.Phase.Idle -> getString(R.string.player_idle)
             PlayerUiState.Phase.Preparing -> getString(R.string.player_preparing)
-            PlayerUiState.Phase.Ready, PlayerUiState.Phase.Playing, PlayerUiState.Phase.Paused ->
-                state.videoInfo?.toLine().orEmpty()
+            PlayerUiState.Phase.Ready, PlayerUiState.Phase.Playing, PlayerUiState.Phase.Paused,
+            PlayerUiState.Phase.Ended -> state.videoInfo?.toLine().orEmpty()
             PlayerUiState.Phase.Failed -> getString(R.string.player_failed, state.error?.toMessage().orEmpty())
         }
         playPauseButton.isEnabled = state.phase == PlayerUiState.Phase.Ready ||
             state.phase == PlayerUiState.Phase.Playing ||
-            state.phase == PlayerUiState.Phase.Paused
+            state.phase == PlayerUiState.Phase.Paused ||
+            state.phase == PlayerUiState.Phase.Ended
         playPauseButton.setText(
             if (state.phase == PlayerUiState.Phase.Playing) R.string.player_pause else R.string.player_play,
         )
@@ -80,6 +96,7 @@ public class PlayerFragment(
     }
 
     override fun onDestroyView() {
+        _binding?.videoSurface?.holder?.removeCallback(surfaceCallback)
         _binding = null
         super.onDestroyView()
     }

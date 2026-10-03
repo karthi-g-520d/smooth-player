@@ -54,4 +54,14 @@ class PlayerReducerTest {
         val paused = PlayerReducer.reduce(playing, PlayerEvent.EngineStateChanged(EngineState.Paused))
         assertEquals(PlayerUiState.Phase.Paused, paused.phase)
     }
+
+    @Test
+    fun `end of stream keeps the video info so the screen can still show it`() {
+        val state = PlayerReducer.reduce(
+            PlayerUiState(phase = PlayerUiState.Phase.Playing, videoInfo = info),
+            PlayerEvent.EngineStateChanged(EngineState.Ended),
+        )
+        assertEquals(PlayerUiState.Phase.Ended, state.phase)
+        assertEquals(info, state.videoInfo)
+    }
 }
