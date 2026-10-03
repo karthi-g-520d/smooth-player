@@ -39,8 +39,12 @@ class MainActivity : AppCompatActivity() {
             exporter = FileCapabilityExporter(applicationContext),
             ioDispatcher = Dispatchers.IO,
         )
+        // One engine is both the playback controller and the surface target, so the fragment's surface
+        // events reach the same engine the view model drives.
+        val playbackEngine = DefaultPlaybackEngine(applicationContext, Dispatchers.IO)
         val playerViewModelFactory = PlayerViewModel.Factory(
-            engine = DefaultPlaybackEngine(applicationContext, Dispatchers.IO),
+            engine = playbackEngine,
+            renderTarget = playbackEngine,
         )
         return object : FragmentFactory() {
             override fun instantiate(classLoader: ClassLoader, className: String): Fragment = when (className) {

@@ -1,9 +1,11 @@
 package com.example.smoothplayer.feature.player.playback
 
+import android.view.Surface
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.smoothplayer.engine.api.PlaybackEngine
+import com.example.smoothplayer.engine.api.RenderTargetController
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,12 +18,15 @@ import kotlinx.coroutines.launch
 /**
  * Bridges [PlaybackEngine]'s ongoing state into [PlayerUiState] and forwards commands to it.
  *
- * No dispatcher is injected here: [PlaybackEngine.open] is a suspend function that already does
- * its own dispatcher switch internally (unlike [com.example.smoothplayer.engine.api.CapabilityProbe],
- * whose blocking `probe()` call forces the capability screen to own that switch itself).
+ * [renderTarget] must be the same object that owns the playback state. The fragment takes its surface
+ * events from here, and this view model outlives activity recreation, so the surface always reaches the
+ * engine that is decoding.
+ *
+ * No dispatcher is injected: [PlaybackEngine.open] is a suspend function that switches dispatchers itself.
  */
 public class PlayerViewModel(
     private val engine: PlaybackEngine,
+    public val renderTarget: RenderTargetController<Surface>,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PlayerUiState())
@@ -57,15 +62,17 @@ public class PlayerViewModel(
     private fun togglePlayback() {
         when (_uiState.value.phase) {
             PlayerUiState.Phase.Playing -> engine.pause()
-            PlayerUiState.Phase.Ready, PlayerUiState.Phase.Paused -> engine.play()
+            PlayerUiState.Phase.Ready, PlayerUiState.Phase.Paused, PlayerUiState.Phase.Ended -> engine.play()
             else -> Unit
         }
     }
 
     public class Factory(
         private val engine: PlaybackEngine,
+        private val renderTarget: RenderTargetController<Surface>,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = PlayerViewModel(engine) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T =
+            PlayerViewModel(engine, renderTarget) as T
     }
 }
