@@ -22,7 +22,7 @@
     <string name="player_choose_file">Choose video</string>
     <string name="player_idle">No video selected</string>
     <string name="player_preparing">Reading file…</string>
-    <string name="player_info">%1$d × %2$d · %3$d s · audio: %4$s · rotation: %5$d°</string>
+    <string name="player_info">%1$d × %2$d · %3$d s · audio: %4$b · rotation: %5$d°</string>
     <string name="player_failed">Failed: %1$s</string>
     <string name="player_play">Play</string>
     <string name="player_pause">Pause</string>
