@@ -1,0 +1,59 @@
+# Sanity gate for pull requests into main: unit tests, lint, and a debug build must all pass.
+# Branch protection on main should require this workflow's job before a PR can be merged.
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+# Cancel a superseded run when new commits land on the same branch/PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    name: Unit tests, lint, debug build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # gradlew's executable bit isn't tracked in git (lost on a Windows checkout), so set it
+      # explicitly rather than relying on the file mode stored in the repo.
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Unit tests (all modules)
+        run: ./gradlew testDebugUnitTest test --stacktrace
+
+      - name: Lint
+        run: ./gradlew lint --stacktrace
+
+      - name: Assemble debug
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload test and lint reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            **/build/reports/tests/
+            **/build/reports/lint-results-*.html
+          retention-days: 7
