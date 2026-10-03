@@ -12,6 +12,10 @@ android {
         minSdk = 26
     }
 
+    buildFeatures {
+        viewBinding = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -20,4 +24,10 @@ android {
 
 dependencies {
     implementation(project(":engine:api"))
+    // Brings androidx.fragment transitively; the screen is a Fragment.
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.lifecycle.runtime)
+    implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.kotlinx.coroutines.android)
+    testImplementation(libs.junit)
 }

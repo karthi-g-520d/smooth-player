@@ -1,0 +1,21 @@
+<resources>
+    <string name="capability_probing">Probing device...</string>
+    <string name="capability_probe_failed">Probe failed: %1$s</string>
+
+    <string name="capability_export_button">Export JSON</string>
+    <string name="capability_export_running">Exporting...</string>
+    <string name="capability_export_saved">Saved to %1$s</string>
+    <string name="capability_export_failed">Export failed: %1$s</string>
+
+    <string name="capability_check_pass">PASS</string>
+    <string name="capability_check_fail">FAIL</string>
+    <string name="capability_check_line">%1$s  %2$s: %3$s</string>
+
+    <string name="capability_check_gles_31">OpenGL ES 3.1 or newer</string>
+    <string name="capability_check_essl3_external_image">GL_OES_EGL_image_external_essl3</string>
+    <string name="capability_check_compute_invocations">Compute invocations (min 128)</string>
+    <string name="capability_check_compute_shared_memory">Compute shared memory (min 16 KB)</string>
+    <string name="capability_check_thermal_api">Thermal headroom API</string>
+    <string name="capability_check_h264_hw_1080p60">H.264 hardware decode 1080p60</string>
+    <string name="capability_check_hevc_hw_1080p60">HEVC hardware decode 1080p60</string>
+</resources>
