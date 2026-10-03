@@ -8,16 +8,15 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentFactory
 import com.example.smoothplayer.engine.impl.capability.DefaultCapabilityProbe
-import com.example.smoothplayer.engine.impl.render.HelloGlRenderer
+import com.example.smoothplayer.engine.impl.playback.DefaultPlaybackEngine
 import com.example.smoothplayer.feature.player.capability.CapabilityFragment
 import com.example.smoothplayer.feature.player.capability.CapabilityViewModel
-import com.example.smoothplayer.feature.player.render.HelloGlFragment
+import com.example.smoothplayer.feature.player.playback.PlayerFragment
+import com.example.smoothplayer.feature.player.playback.PlayerViewModel
 import kotlinx.coroutines.Dispatchers
 
 /** Wiring only: builds the dependencies and hosts the feature screens. */
 class MainActivity : AppCompatActivity() {
-    private val helloGlRenderer = HelloGlRenderer()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         // Set before super.onCreate so fragments restored after rotation are built with their dependencies.
         supportFragmentManager.fragmentFactory = screenFragmentFactory()
@@ -28,15 +27,10 @@ class MainActivity : AppCompatActivity() {
 
         if (savedInstanceState == null) {
             supportFragmentManager.beginTransaction()
-                .replace(R.id.hello_gl_container, HelloGlFragment::class.java, null)
+                .replace(R.id.player_container, PlayerFragment::class.java, null)
                 .replace(R.id.fragment_container, CapabilityFragment::class.java, null)
                 .commit()
         }
-    }
-
-    override fun onDestroy() {
-        helloGlRenderer.close()
-        super.onDestroy()
     }
 
     private fun screenFragmentFactory(): FragmentFactory {
@@ -45,10 +39,13 @@ class MainActivity : AppCompatActivity() {
             exporter = FileCapabilityExporter(applicationContext),
             ioDispatcher = Dispatchers.IO,
         )
+        val playerViewModelFactory = PlayerViewModel.Factory(
+            engine = DefaultPlaybackEngine(applicationContext, Dispatchers.IO),
+        )
         return object : FragmentFactory() {
             override fun instantiate(classLoader: ClassLoader, className: String): Fragment = when (className) {
                 CapabilityFragment::class.java.name -> CapabilityFragment(capabilityViewModelFactory)
-                HelloGlFragment::class.java.name -> HelloGlFragment(helloGlRenderer)
+                PlayerFragment::class.java.name -> PlayerFragment(playerViewModelFactory)
                 else -> super.instantiate(classLoader, className)
             }
         }

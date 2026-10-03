@@ -1,0 +1,103 @@
+package com.example.smoothplayer.feature.player.playback
+
+import android.os.Bundle
+import android.view.View
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.example.smoothplayer.engine.api.model.EngineError
+import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
+import com.example.smoothplayer.engine.api.model.VideoInfo
+import com.example.smoothplayer.feature.player.R
+import com.example.smoothplayer.feature.player.databinding.FragmentPlayerBinding
+import kotlinx.coroutines.launch
+
+private const val VIDEO_MIME_FILTER = "video/*"
+
+/**
+ * Thin view: launches the file picker, forwards clicks as events and renders [PlayerUiState].
+ *
+ * See the ValidFragment note on [com.example.smoothplayer.feature.player.capability.CapabilityFragment]:
+ * the same custom FragmentFactory covers this fragment too.
+ */
+@Suppress("ValidFragment")
+public class PlayerFragment(
+    private val viewModelFactory: ViewModelProvider.Factory,
+) : Fragment(R.layout.fragment_player) {
+
+    // HEADER
+    private var _binding: FragmentPlayerBinding? = null
+    private val binding get() = checkNotNull(_binding)
+    private val viewModel: PlayerViewModel by lazy {
+        ViewModelProvider(this, viewModelFactory)[PlayerViewModel::class.java]
+    }
+    private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.onEvent(PlayerEvent.FileChosen(it.toString())) }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        _binding = FragmentPlayerBinding.bind(view)
+        bindListeners()
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch { viewModel.uiState.collect(::render) }
+                launch { viewModel.effects.collect(::handleEffect) }
+            }
+        }
+    }
+
+    // BODY
+    private fun render(state: PlayerUiState) = with(binding) {
+        infoText.text = when (state.phase) {
+            PlayerUiState.Phase.Idle -> getString(R.string.player_idle)
+            PlayerUiState.Phase.Preparing -> getString(R.string.player_preparing)
+            PlayerUiState.Phase.Ready, PlayerUiState.Phase.Playing, PlayerUiState.Phase.Paused ->
+                state.videoInfo?.toLine().orEmpty()
+            PlayerUiState.Phase.Failed -> getString(R.string.player_failed, state.error?.toMessage().orEmpty())
+        }
+        playPauseButton.isEnabled = state.phase == PlayerUiState.Phase.Ready ||
+            state.phase == PlayerUiState.Phase.Playing ||
+            state.phase == PlayerUiState.Phase.Paused
+        playPauseButton.setText(
+            if (state.phase == PlayerUiState.Phase.Playing) R.string.player_pause else R.string.player_play,
+        )
+    }
+
+    // FOOTER
+    private fun bindListeners() = with(binding) {
+        chooseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.ChooseFileClicked) }
+        playPauseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.PlayPauseClicked) }
+    }
+
+    private fun handleEffect(effect: PlayerEffect) {
+        when (effect) {
+            PlayerEffect.OpenFilePicker -> openDocument.launch(arrayOf(VIDEO_MIME_FILTER))
+        }
+    }
+
+    override fun onDestroyView() {
+        _binding = null
+        super.onDestroyView()
+    }
+
+    private fun VideoInfo.toLine(): String = getString(
+        R.string.player_info,
+        width,
+        height,
+        durationUs.value / MICROS_PER_SECOND,
+        hasAudio,
+        rotationDegrees,
+    )
+
+    private fun EngineError.toMessage(): String = when (this) {
+        is EngineError.CodecFailed -> getString(R.string.player_error_codec, diagnostic)
+        is EngineError.UnsupportedFormat -> getString(R.string.player_error_unsupported_format, mime)
+        is EngineError.GlFailed -> getString(R.string.player_error_gl, glError.toString(16), where)
+        is EngineError.SourceUnavailable -> getString(R.string.player_error_source_unavailable, reason)
+        EngineError.ThermalThrottled -> getString(R.string.player_error_thermal)
+    }
+}
