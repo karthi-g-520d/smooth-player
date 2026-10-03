@@ -7,5 +7,7 @@ kotlin {
 }
 
 dependencies {
+    // StateFlow appears in PlaybackEngine's public signature, so this is api, not implementation.
+    api(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)
 }

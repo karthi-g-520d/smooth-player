@@ -18,4 +18,18 @@
     <string name="capability_check_thermal_api">Thermal headroom API</string>
     <string name="capability_check_h264_hw_1080p60">H.264 hardware decode 1080p60</string>
     <string name="capability_check_hevc_hw_1080p60">HEVC hardware decode 1080p60</string>
+
+    <string name="player_choose_file">Choose video</string>
+    <string name="player_idle">No video selected</string>
+    <string name="player_preparing">Reading file…</string>
+    <string name="player_info">%1$d × %2$d · %3$d s · audio: %4$s · rotation: %5$d°</string>
+    <string name="player_failed">Failed: %1$s</string>
+    <string name="player_play">Play</string>
+    <string name="player_pause">Pause</string>
+
+    <string name="player_error_codec">Codec failed: %1$s</string>
+    <string name="player_error_unsupported_format">Unsupported format: %1$s</string>
+    <string name="player_error_gl">GL error 0x%1$s in %2$s</string>
+    <string name="player_error_source_unavailable">Could not open file: %1$s</string>
+    <string name="player_error_thermal">Device is throttling from heat</string>
 </resources>
