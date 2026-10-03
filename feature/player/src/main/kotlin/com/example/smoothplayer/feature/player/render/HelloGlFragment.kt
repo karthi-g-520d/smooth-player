@@ -9,7 +9,13 @@ import com.example.smoothplayer.engine.api.RenderTargetController
 import com.example.smoothplayer.feature.player.R
 import com.example.smoothplayer.feature.player.databinding.FragmentHelloGlBinding
 
-/** Thin view: hosts the render surface and forwards its lifecycle to [renderer]. */
+/**
+ * Thin view: hosts the render surface and forwards its lifecycle to [renderer].
+ *
+ * See the ValidFragment note on [com.example.smoothplayer.feature.player.capability.CapabilityFragment]:
+ * the same custom FragmentFactory covers this fragment too.
+ */
+@Suppress("ValidFragment")
 public class HelloGlFragment(
     private val renderer: RenderTargetController<Surface>,
 ) : Fragment(R.layout.fragment_hello_gl) {

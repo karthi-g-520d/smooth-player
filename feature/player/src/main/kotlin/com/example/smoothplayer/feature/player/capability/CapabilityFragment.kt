@@ -14,7 +14,15 @@ import com.example.smoothplayer.feature.player.R
 import com.example.smoothplayer.feature.player.databinding.FragmentCapabilityBinding
 import kotlinx.coroutines.launch
 
-/** Thin view: binds widgets, forwards clicks as events and renders [CapabilityUiState]. */
+/**
+ * Thin view: binds widgets, forwards clicks as events and renders [CapabilityUiState].
+ *
+ * Lint's ValidFragment check assumes the system recreates fragments via reflection using a
+ * no-arg constructor, which would drop [viewModelFactory]. That assumption doesn't hold here:
+ * MainActivity installs a [androidx.fragment.app.FragmentFactory] before `super.onCreate`, so
+ * this constructor is the only one ever used, including across process recreation.
+ */
+@Suppress("ValidFragment")
 public class CapabilityFragment(
     private val viewModelFactory: ViewModelProvider.Factory,
 ) : Fragment(R.layout.fragment_capability) {
