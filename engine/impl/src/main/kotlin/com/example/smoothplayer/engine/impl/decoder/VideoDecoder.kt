@@ -10,6 +10,9 @@ import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.impl.clock.MasterClock
 import com.example.smoothplayer.engine.impl.pacer.FrameDecision
 import com.example.smoothplayer.engine.impl.pacer.decideFrame
+import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
+import com.example.smoothplayer.engine.impl.telemetry.TraceNames
+import com.example.smoothplayer.engine.impl.telemetry.trace
 import java.util.ArrayDeque
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -40,6 +43,7 @@ internal class VideoDecoder(
     private val trackIndex: Int,
     private val trackFormat: MediaFormat,
     private val clock: MasterClock,
+    private val telemetry: FrameTelemetry,
     private val outputSurfaceProvider: () -> Surface,
     private val onFrameShown: (Micros) -> Unit,
     private val onEndOfStream: () -> Unit,
@@ -170,11 +174,13 @@ internal class VideoDecoder(
         while (canDecode() && heldOutputs.isNotEmpty()) {
             val output = heldOutputs.first()
             val target = seekTargetUs
+            val clockUs = clock.nowUs()
+            val discardForSeek = target != null && output.ptsUs < target
             val decision = when {
                 output.isEmptyEnd -> FrameDecision.Render
-                target != null && output.ptsUs < target -> FrameDecision.Drop
+                discardForSeek -> FrameDecision.Drop
                 target != null -> FrameDecision.Render
-                else -> decideFrame(output.ptsUs, clock.nowUs(), clock.isStalled())
+                else -> decideFrame(output.ptsUs, clockUs, clock.isStalled())
             }
             if (decision is FrameDecision.Wait) {
                 handler.postDelayed(pollHeldOutputs, maxOf(1L, decision.delayUs / MICROS_PER_MILLI))
@@ -183,7 +189,16 @@ internal class VideoDecoder(
             heldOutputs.removeFirst()
             val render = !output.isEmptyEnd && decision == FrameDecision.Render
             if (target != null && (output.ptsUs >= target || output.endOfStream)) seekTargetUs = null
-            mediaCodec.releaseOutputBuffer(output.index, render)
+            trace(TraceNames.VIDEO_RELEASE) { mediaCodec.releaseOutputBuffer(output.index, render) }
+            if (!output.isEmptyEnd && !discardForSeek) {
+                telemetry.onFrameReleased(
+                    ptsUs = output.ptsUs,
+                    clockUs = clockUs,
+                    rendered = render,
+                    releaseNs = System.nanoTime(),
+                    clockReady = clock.isReady() && !paused,
+                )
+            }
             if (render) onFrameShown(output.ptsUs)
             if (output.endOfStream) onEndOfStream()
         }

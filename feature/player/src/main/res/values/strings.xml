@@ -32,4 +32,16 @@
     <string name="player_error_gl">GL error 0x%1$s in %2$s</string>
     <string name="player_error_source_unavailable">Could not open file: %1$s</string>
     <string name="player_error_thermal">Device is throttling from heat</string>
+
+    <string name="player_stats_show">Show stats</string>
+    <string name="player_stats_hide">Hide stats</string>
+    <string name="player_stats_waiting">Stats appear once frames are shown</string>
+    <string name="player_stats_na">n/a</string>
+    <string name="player_stats_drift">%1$d ms</string>
+    <string name="player_stats_gpu">%1$.2f ms</string>
+    <string name="player_stats_thermal">%1$.2f</string>
+    <string name="player_stats">display %1$.1f fps · content %2$.1f fps\nrendered %3$d · dropped %4$d · A/V drift %5$s\nGPU present p50 %6$s · p95 %7$s\nrefresh %8$.0f Hz · thermal %9$s</string>
+    <string name="player_log_start">Log CSV</string>
+    <string name="player_log_stop">Stop log</string>
+    <string name="player_log_saved">Logging to %1$s</string>
 </resources>

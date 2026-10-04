@@ -3,6 +3,7 @@ package com.example.smoothplayer.feature.player.playback
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.Micros
+import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -73,6 +74,23 @@ class PlayerReducerTest {
         )
         assertEquals(Micros(2_500_000), state.position)
         assertEquals(PlayerUiState.Phase.Playing, state.phase)
+    }
+
+    @Test
+    fun `stats toggle the overlay and the logging toggle switches the log on and off`() {
+        val shown = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.StatsToggled)
+        assertEquals(true, shown.statsVisible)
+        assertEquals(false, PlayerReducer.reduce(shown, PlayerEvent.StatsToggled).statsVisible)
+
+        val logging = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.LoggingToggled)
+        assertEquals(true, logging.loggingEnabled)
+        assertEquals(false, PlayerReducer.reduce(logging, PlayerEvent.LoggingToggled).loggingEnabled)
+    }
+
+    @Test
+    fun `received stats replace the last snapshot`() {
+        val stats = PlaybackStats(displayFps = 30f, renderedFrames = 90L)
+        assertEquals(stats, PlayerReducer.reduce(PlayerUiState(), PlayerEvent.StatsReceived(stats)).stats)
     }
 
     @Test

@@ -13,6 +13,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
+import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.feature.player.R
 import com.example.smoothplayer.feature.player.databinding.FragmentPlayerBinding
@@ -20,6 +21,7 @@ import kotlinx.coroutines.launch
 
 private const val VIDEO_MIME_FILTER = "video/*"
 private const val MICROS_PER_MILLI = 1_000L
+private const val NANOS_PER_MILLI = 1_000_000.0
 
 /**
  * Thin view: launches the file picker, forwards clicks and surface events, and renders [PlayerUiState].
@@ -92,7 +94,33 @@ public class PlayerFragment(
         seekBar.isEnabled = hasVideo
         seekBar.max = durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         renderSeekPosition(state.position)
+        renderStats(state)
     }
+
+    private fun renderStats(state: PlayerUiState) = with(binding) {
+        statsButton.setText(if (state.statsVisible) R.string.player_stats_hide else R.string.player_stats_show)
+        logButton.setText(if (state.loggingEnabled) R.string.player_log_stop else R.string.player_log_start)
+        statsText.visibility = if (state.statsVisible) View.VISIBLE else View.GONE
+        statsText.text = state.stats?.toOverlayText() ?: getString(R.string.player_stats_waiting)
+    }
+
+    private fun PlaybackStats.toOverlayText(): String {
+        val text = getString(
+            R.string.player_stats,
+            displayFps,
+            contentFps,
+            renderedFrames,
+            droppedFrames,
+            avDrift?.let { getString(R.string.player_stats_drift, it.value / MICROS_PER_MILLI) } ?: notAvailable(),
+            presentGpuP50?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+            presentGpuP95?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+            refreshHz,
+            thermalHeadroom?.let { getString(R.string.player_stats_thermal, it) } ?: notAvailable(),
+        )
+        return logPath?.let { "$text\n${getString(R.string.player_log_saved, it)}" } ?: text
+    }
+
+    private fun notAvailable(): String = getString(R.string.player_stats_na)
 
     private fun renderSeekPosition(position: Micros) {
         // Position updates must not move the thumb while the finger is on it.
@@ -104,6 +132,8 @@ public class PlayerFragment(
     private fun bindListeners() = with(binding) {
         chooseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.ChooseFileClicked) }
         playPauseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.PlayPauseClicked) }
+        statsButton.setOnClickListener { viewModel.onEvent(PlayerEvent.StatsToggled) }
+        logButton.setOnClickListener { viewModel.onEvent(PlayerEvent.LoggingToggled) }
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) = Unit
 

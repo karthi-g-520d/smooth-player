@@ -41,6 +41,9 @@ public class PlayerViewModel(
         viewModelScope.launch {
             engine.position.collect { onEvent(PlayerEvent.PositionChanged(it)) }
         }
+        viewModelScope.launch {
+            engine.stats.collect { onEvent(PlayerEvent.StatsReceived(it)) }
+        }
     }
 
     public fun onEvent(event: PlayerEvent) {
@@ -50,8 +53,11 @@ public class PlayerViewModel(
             is PlayerEvent.FileChosen -> openFile(event.uri)
             PlayerEvent.PlayPauseClicked -> togglePlayback()
             is PlayerEvent.SeekRequested -> engine.seekTo(event.position)
+            PlayerEvent.LoggingToggled -> engine.setTelemetryLogging(_uiState.value.loggingEnabled)
             is PlayerEvent.EngineStateChanged -> Unit
             is PlayerEvent.PositionChanged -> Unit
+            is PlayerEvent.StatsReceived -> Unit
+            PlayerEvent.StatsToggled -> Unit
         }
     }
 
