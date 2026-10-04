@@ -18,6 +18,12 @@
         android:layout_weight="2"
         android:layout_marginTop="@dimen/dimen_player_spacing" />
 
+    <SeekBar
+        android:id="@+id/seekBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:enabled="false" />
+
     <TextView
         android:id="@+id/infoText"
         android:layout_width="match_parent"

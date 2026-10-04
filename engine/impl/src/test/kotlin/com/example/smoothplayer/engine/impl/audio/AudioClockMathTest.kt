@@ -25,4 +25,20 @@ class AudioClockMathTest {
     fun `a clock anchored mid-stream counts only frames after the anchor`() {
         assertEquals(1_500_000L, audioPositionUs(anchorPtsUs = 1_000_000L, anchorHead = 24_000L, head = 48_000L, sampleRate = 48_000))
     }
+
+    @Test
+    fun `a chunk that starts after the seek target skips nothing`() {
+        assertEquals(0L, framesBeforeTarget(chunkPtsUs = 50_000L, chunkFrames = 1_024L, targetUs = 10_000L, sampleRate = 48_000))
+    }
+
+    @Test
+    fun `a chunk that straddles the seek target skips the frames before it`() {
+        // 10 ms at 48 kHz is 480 frames.
+        assertEquals(480L, framesBeforeTarget(chunkPtsUs = 0L, chunkFrames = 1_024L, targetUs = 10_000L, sampleRate = 48_000))
+    }
+
+    @Test
+    fun `a chunk wholly before the seek target is skipped entirely`() {
+        assertEquals(1_024L, framesBeforeTarget(chunkPtsUs = 0L, chunkFrames = 1_024L, targetUs = 100_000L, sampleRate = 48_000))
+    }
 }

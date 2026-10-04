@@ -25,6 +25,13 @@ private const val MICROS_PER_MILLI = 1_000L
  * until [clock] says they are due. A frame is then shown, dropped when it is more than 40 ms late, or
  * held and checked again later (see [decideFrame]). While paused, input and output are both held.
  *
+ * A seek sets [seekTargetUs]. Frames before the target are discarded, and the first frame at or after it
+ * is shown at once, even while paused, so a seek always lands on a picture.
+ *
+ * A seek replaces the codec rather than flushing it. A flushed codec can still deliver callbacks that were
+ * queued before the flush, and those name buffers the codec no longer owns. Callbacks are ignored unless
+ * they come from the current codec.
+ *
  * [outputSurfaceProvider] runs on the decoder thread, so waiting for the surface does not block the UI.
  * The extractor is used only from the decoder thread until [release] returns.
  */
@@ -34,6 +41,7 @@ internal class VideoDecoder(
     private val trackFormat: MediaFormat,
     private val clock: MasterClock,
     private val outputSurfaceProvider: () -> Surface,
+    private val onFrameShown: (Micros) -> Unit,
     private val onEndOfStream: () -> Unit,
     private val onFailure: (String) -> Unit,
 ) {
@@ -44,6 +52,7 @@ internal class VideoDecoder(
     private val pollHeldOutputs = Runnable { releaseHeldOutputs() }
     private var codec: MediaCodec? = null
     private var paused = false
+    private var seekTargetUs: Micros? = null
 
     private class HeldOutput(val index: Int, val ptsUs: Micros, val size: Int, val flags: Int) {
         val endOfStream: Boolean get() = (flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
@@ -54,11 +63,13 @@ internal class VideoDecoder(
 
     private val callback = object : MediaCodec.Callback() {
         override fun onInputBufferAvailable(mediaCodec: MediaCodec, index: Int) {
+            if (!isCurrent(mediaCodec)) return
             feeder.onInputAvailable(index)
-            feeder.feed(mediaCodec, paused)
+            feeder.feed(mediaCodec, !canDecode())
         }
 
         override fun onOutputBufferAvailable(mediaCodec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+            if (!isCurrent(mediaCodec)) return
             heldOutputs.addLast(HeldOutput(index, Micros(info.presentationTimeUs), info.size, info.flags))
             releaseHeldOutputs()
         }
@@ -66,7 +77,8 @@ internal class VideoDecoder(
         override fun onOutputFormatChanged(mediaCodec: MediaCodec, format: MediaFormat) = Unit
 
         override fun onError(mediaCodec: MediaCodec, e: MediaCodec.CodecException) {
-            onFailure(e.diagnosticInfo ?: e.message.orEmpty())
+            if (!isCurrent(mediaCodec)) return
+            onFailure(e.diagnosticInfo)
         }
     }
 
@@ -76,12 +88,7 @@ internal class VideoDecoder(
             try {
                 extractor.selectTrack(trackIndex)
                 extractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                val mime = checkNotNull(trackFormat.getString(MediaFormat.KEY_MIME))
-                val mediaCodec = MediaCodec.createDecoderByType(mime)
-                mediaCodec.setCallback(callback, handler)
-                mediaCodec.configure(trackFormat, outputSurfaceProvider(), null, 0)
-                mediaCodec.start()
-                codec = mediaCodec
+                startCodec()
             } catch (e: Exception) {
                 onFailure(e.message ?: e.toString())
             }
@@ -93,8 +100,28 @@ internal class VideoDecoder(
         handler.post {
             paused = value
             if (!value) {
-                codec?.let { feeder.feed(it, paused) }
+                codec?.let { feeder.feed(it, !canDecode()) }
                 releaseHeldOutputs()
+            }
+        }
+    }
+
+    /**
+     * Jumps to the sync frame at or before [target] and discards forward to it. The codec is replaced, so
+     * frames decoded before the seek cannot reach the screen. Runs on the decoder thread.
+     */
+    fun seekTo(target: Micros) {
+        handler.post {
+            seekTargetUs = target
+            handler.removeCallbacks(pollHeldOutputs)
+            heldOutputs.clear()
+            extractor.seekTo(target.value, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            feeder.reset()
+            try {
+                releaseCodec()
+                startCodec()
+            } catch (e: Exception) {
+                onFailure(e.message ?: e.toString())
             }
         }
     }
@@ -105,11 +132,7 @@ internal class VideoDecoder(
         handler.post {
             try {
                 handler.removeCallbacks(pollHeldOutputs)
-                codec?.let { mediaCodec ->
-                    runCatching { mediaCodec.stop() }
-                    mediaCodec.release()
-                }
-                codec = null
+                releaseCodec()
                 heldOutputs.clear()
             } finally {
                 done.countDown()
@@ -119,16 +142,44 @@ internal class VideoDecoder(
         thread.quitSafely()
     }
 
-    /** Releases every held frame that is due, in order. Stops at the first frame that is still early. */
+    /** Creates, configures and starts a codec for [trackFormat], then makes it the current one. */
+    private fun startCodec() {
+        val mime = checkNotNull(trackFormat.getString(MediaFormat.KEY_MIME))
+        val mediaCodec = MediaCodec.createDecoderByType(mime)
+        mediaCodec.setCallback(callback, handler)
+        mediaCodec.configure(trackFormat, outputSurfaceProvider(), null, 0)
+        mediaCodec.start()
+        codec = mediaCodec
+    }
+
+    /** Detaches the current codec first, so any callbacks it still posts are recognised as stale. */
+    private fun releaseCodec() {
+        val old = codec ?: return
+        codec = null
+        runCatching { old.stop() }
+        old.release()
+    }
+
+    private fun isCurrent(mediaCodec: MediaCodec): Boolean = mediaCodec === codec
+
+    /** Input and output run while playing, and also while a seek is looking for its landing frame. */
+    private fun canDecode(): Boolean = !paused || seekTargetUs != null
+
+    /**
+     * Releases held frames in order while [canDecode] holds. A frame before a pending seek target is dropped.
+     * The first frame at or after the target is shown at once. Other frames wait for the clock.
+     */
     private fun releaseHeldOutputs() {
         handler.removeCallbacks(pollHeldOutputs)
         val mediaCodec = codec ?: return
-        while (!paused && heldOutputs.isNotEmpty()) {
+        while (canDecode() && heldOutputs.isNotEmpty()) {
             val output = heldOutputs.first()
-            val decision = if (output.isEmptyEnd) {
-                FrameDecision.Render
-            } else {
-                decideFrame(output.ptsUs, clock.nowUs(), clock.isStalled())
+            val target = seekTargetUs
+            val decision = when {
+                output.isEmptyEnd -> FrameDecision.Render
+                target != null && output.ptsUs < target -> FrameDecision.Drop
+                target != null -> FrameDecision.Render
+                else -> decideFrame(output.ptsUs, clock.nowUs(), clock.isStalled())
             }
             if (decision is FrameDecision.Wait) {
                 handler.postDelayed(pollHeldOutputs, maxOf(1L, decision.delayUs / MICROS_PER_MILLI))
@@ -136,7 +187,9 @@ internal class VideoDecoder(
             }
             heldOutputs.removeFirst()
             val render = !output.isEmptyEnd && decision == FrameDecision.Render
+            if (target != null && (output.ptsUs >= target || output.endOfStream)) seekTargetUs = null
             mediaCodec.releaseOutputBuffer(output.index, render)
+            if (render) onFrameShown(output.ptsUs)
             if (output.endOfStream) onEndOfStream()
         }
     }

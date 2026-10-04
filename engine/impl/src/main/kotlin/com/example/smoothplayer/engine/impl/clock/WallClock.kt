@@ -32,6 +32,13 @@ internal class WallClock : MasterClock {
         if (runningSinceNs == null) runningSinceNs = SystemClock.elapsedRealtimeNanos()
     }
 
+    /** Sets the media time to [at]. Keeps the running or paused state as it was. */
+    @Synchronized
+    fun reset(at: Micros) {
+        accumulatedNs = at.toNanos().value
+        if (runningSinceNs != null) runningSinceNs = SystemClock.elapsedRealtimeNanos()
+    }
+
     @Synchronized
     override fun nowUs(): Micros {
         val runningNs = runningSinceNs?.let { SystemClock.elapsedRealtimeNanos() - it } ?: 0L

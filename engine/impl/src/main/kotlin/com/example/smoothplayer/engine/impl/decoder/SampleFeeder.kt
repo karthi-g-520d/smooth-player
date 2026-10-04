@@ -18,6 +18,12 @@ internal class SampleFeeder(private val extractor: MediaExtractor) {
         freeInputs.addLast(index)
     }
 
+    /** Forgets the free buffers and the end-of-track marker. Call after the codec is flushed, because its indices are invalid. */
+    fun reset() {
+        freeInputs.clear()
+        ended = false
+    }
+
     /** Queues samples into every free input buffer, unless [paused]. */
     fun feed(codec: MediaCodec, paused: Boolean) {
         while (!paused && !ended && freeInputs.isNotEmpty()) {

@@ -11,6 +11,7 @@ import android.os.HandlerThread
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.impl.audio.AudioClock
+import com.example.smoothplayer.engine.impl.audio.framesBeforeTarget
 import java.util.ArrayDeque
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -28,6 +29,9 @@ private const val MONO_CHANNELS = 1
  * The FI-Audio thread runs the codec callbacks and every write to the track. Writes are non-blocking, so
  * pause and release never wait behind a full device buffer. [clock] reports how far the device has played,
  * and the video decoder paces frames against it.
+ *
+ * A seek sets [seekTargetUs]. PCM before the target is discarded. The first chunk at or after it anchors
+ * the clock, and a chunk that straddles the target is trimmed so its audio starts exactly on the target.
  *
  * The extractor is used only from FI-Audio until [release] returns.
  */
@@ -59,6 +63,7 @@ internal class AudioDecoder(
     private var paused = false
     private var started = false
     private var writtenFrames = 0L
+    private var seekTargetUs: Micros? = null
 
     private class PendingOutput(
         val index: Int,
@@ -67,16 +72,22 @@ internal class AudioDecoder(
         val size: Int,
         val endOfStream: Boolean,
     ) {
+        /** Bytes of this chunk already written, or skipped by a seek. */
         var written = 0
+
+        /** Where the clock is anchored when this chunk starts playing. Differs from [ptsUs] only after a seek. */
+        var anchorUs = ptsUs
     }
 
     private val callback = object : MediaCodec.Callback() {
         override fun onInputBufferAvailable(mediaCodec: MediaCodec, index: Int) {
+            if (!isCurrent(mediaCodec)) return
             feeder.onInputAvailable(index)
             feeder.feed(mediaCodec, paused)
         }
 
         override fun onOutputBufferAvailable(mediaCodec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+            if (!isCurrent(mediaCodec)) return
             val endOfStream = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
             pendingOutputs.addLast(
                 PendingOutput(index, Micros(info.presentationTimeUs), info.offset, info.size, endOfStream),
@@ -87,7 +98,8 @@ internal class AudioDecoder(
         override fun onOutputFormatChanged(mediaCodec: MediaCodec, format: MediaFormat) = Unit
 
         override fun onError(mediaCodec: MediaCodec, e: MediaCodec.CodecException) {
-            onFailure(EngineError.CodecFailed(e.diagnosticInfo ?: e.message.orEmpty(), e.isRecoverable))
+            if (!isCurrent(mediaCodec)) return
+            onFailure(EngineError.CodecFailed(e.diagnosticInfo, e.isRecoverable))
         }
     }
 
@@ -97,12 +109,7 @@ internal class AudioDecoder(
             try {
                 extractor.selectTrack(trackIndex)
                 extractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                val mime = checkNotNull(trackFormat.getString(MediaFormat.KEY_MIME))
-                val mediaCodec = MediaCodec.createDecoderByType(mime)
-                mediaCodec.setCallback(callback, handler)
-                mediaCodec.configure(trackFormat, null, null, 0)
-                mediaCodec.start()
-                codec = mediaCodec
+                startCodec()
             } catch (e: Exception) {
                 onFailure(EngineError.CodecFailed(e.message ?: e.toString(), recoverable = false))
             }
@@ -122,17 +129,37 @@ internal class AudioDecoder(
         }
     }
 
+    /**
+     * Stops the track, drops queued PCM and moves the codec to [target]. The clock is reset on the calling thread,
+     * so video never paces against the old position while the seek is still in flight.
+     */
+    fun seekTo(target: Micros) {
+        clock.reset()
+        handler.post {
+            seekTargetUs = target
+            pendingOutputs.clear()
+            handler.removeCallbacks(retryWrite)
+            started = false
+            track.pause()
+            track.flush()
+            extractor.seekTo(target.value, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            feeder.reset()
+            try {
+                releaseCodec()
+                startCodec()
+            } catch (e: Exception) {
+                onFailure(EngineError.CodecFailed(e.message ?: e.toString(), recoverable = false))
+            }
+        }
+    }
+
     /** Stops and releases the codec and the track, then the thread. Blocks briefly, like [VideoDecoder.release]. */
     fun release() {
         val done = CountDownLatch(1)
         handler.post {
             try {
                 handler.removeCallbacks(retryWrite)
-                codec?.let { mediaCodec ->
-                    runCatching { mediaCodec.stop() }
-                    mediaCodec.release()
-                }
-                codec = null
+                releaseCodec()
                 pendingOutputs.clear()
                 runCatching { track.stop() }
                 track.release()
@@ -144,12 +171,33 @@ internal class AudioDecoder(
         thread.quitSafely()
     }
 
+    /** Creates, configures and starts a codec for [trackFormat], then makes it the current one. */
+    private fun startCodec() {
+        val mime = checkNotNull(trackFormat.getString(MediaFormat.KEY_MIME))
+        val mediaCodec = MediaCodec.createDecoderByType(mime)
+        mediaCodec.setCallback(callback, handler)
+        mediaCodec.configure(trackFormat, null, null, 0)
+        mediaCodec.start()
+        codec = mediaCodec
+    }
+
+    /** Detaches the current codec first, so any callbacks it still posts are recognised as stale. */
+    private fun releaseCodec() {
+        val old = codec ?: return
+        codec = null
+        runCatching { old.stop() }
+        old.release()
+    }
+
+    private fun isCurrent(mediaCodec: MediaCodec): Boolean = mediaCodec === codec
+
     /** Writes queued PCM to the track until it is full, then retries shortly. Releases each codec buffer once written. */
     private fun writePending() {
         handler.removeCallbacks(retryWrite)
         val mediaCodec = codec ?: return
         while (!paused && pendingOutputs.isNotEmpty()) {
             val output = pendingOutputs.first()
+            trimToSeekTarget(output)
             if (output.written < output.size) {
                 val buffer = checkNotNull(mediaCodec.getOutputBuffer(output.index))
                 buffer.limit(output.offset + output.size)
@@ -163,7 +211,7 @@ internal class AudioDecoder(
                     handler.postDelayed(retryWrite, WRITE_RETRY_MS)
                     return
                 }
-                if (!started) startPlayback(output.ptsUs)
+                if (!started) startPlayback(output.anchorUs)
                 output.written += bytes
                 writtenFrames += bytes / bytesPerFrame
             }
@@ -175,10 +223,26 @@ internal class AudioDecoder(
         }
     }
 
-    /** Anchors the clock to the first chunk's PTS, then starts the device. The head counter is still zero here. */
-    private fun startPlayback(firstPtsUs: Micros) {
-        clock.anchorAt(firstPtsUs)
+    /**
+     * While a seek is pending, skips the frames of [output] that fall before the target. A chunk wholly before
+     * the target is skipped entirely, and the seek stays pending for the next one.
+     */
+    private fun trimToSeekTarget(output: PendingOutput) {
+        val target = seekTargetUs ?: return
+        val chunkFrames = (output.size / bytesPerFrame).toLong()
+        val skipFrames = framesBeforeTarget(output.ptsUs.value, chunkFrames, target.value, sampleRate)
+        output.written = (skipFrames * bytesPerFrame).toInt()
+        if (skipFrames < chunkFrames) {
+            seekTargetUs = null
+            if (skipFrames > 0) output.anchorUs = target
+        }
+    }
+
+    /** Anchors the clock at [anchorUs] and starts the device. The head counter is still zero here. */
+    private fun startPlayback(anchorUs: Micros) {
+        clock.anchorAt(anchorUs)
         started = true
+        writtenFrames = 0L
         track.play()
     }
 
