@@ -64,4 +64,20 @@ class PlayerReducerTest {
         assertEquals(PlayerUiState.Phase.Ended, state.phase)
         assertEquals(info, state.videoInfo)
     }
+
+    @Test
+    fun `a position update moves the seek position and keeps the phase`() {
+        val state = PlayerReducer.reduce(
+            PlayerUiState(phase = PlayerUiState.Phase.Playing),
+            PlayerEvent.PositionChanged(Micros(2_500_000)),
+        )
+        assertEquals(Micros(2_500_000), state.position)
+        assertEquals(PlayerUiState.Phase.Playing, state.phase)
+    }
+
+    @Test
+    fun `a seek request leaves the state alone, because the engine acts on it`() {
+        val before = PlayerUiState(phase = PlayerUiState.Phase.Paused, position = Micros(1_000_000))
+        assertEquals(before, PlayerReducer.reduce(before, PlayerEvent.SeekRequested(Micros(9_000_000))))
+    }
 }

@@ -3,6 +3,7 @@ package com.example.smoothplayer.feature.player.playback
 import android.os.Bundle
 import android.view.SurfaceHolder
 import android.view.View
+import android.widget.SeekBar
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
@@ -11,12 +12,14 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
+import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.feature.player.R
 import com.example.smoothplayer.feature.player.databinding.FragmentPlayerBinding
 import kotlinx.coroutines.launch
 
 private const val VIDEO_MIME_FILTER = "video/*"
+private const val MICROS_PER_MILLI = 1_000L
 
 /**
  * Thin view: launches the file picker, forwards clicks and surface events, and renders [PlayerUiState].
@@ -38,6 +41,9 @@ public class PlayerFragment(
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { viewModel.onEvent(PlayerEvent.FileChosen(it.toString())) }
     }
+
+    // True while the finger is on the seek bar. Position updates must not move the thumb under it.
+    private var seekBarTracking = false
 
     // Surface events go to the view model's render target, not to a new one. See PlayerViewModel.
     private val surfaceCallback = object : SurfaceHolder.Callback {
@@ -74,19 +80,43 @@ public class PlayerFragment(
             PlayerUiState.Phase.Ended -> state.videoInfo?.toLine().orEmpty()
             PlayerUiState.Phase.Failed -> getString(R.string.player_failed, state.error?.toMessage().orEmpty())
         }
-        playPauseButton.isEnabled = state.phase == PlayerUiState.Phase.Ready ||
+        val hasVideo = state.phase == PlayerUiState.Phase.Ready ||
             state.phase == PlayerUiState.Phase.Playing ||
             state.phase == PlayerUiState.Phase.Paused ||
             state.phase == PlayerUiState.Phase.Ended
+        playPauseButton.isEnabled = hasVideo
         playPauseButton.setText(
             if (state.phase == PlayerUiState.Phase.Playing) R.string.player_pause else R.string.player_play,
         )
+        val durationMs = (state.videoInfo?.durationUs?.value ?: 0L) / MICROS_PER_MILLI
+        seekBar.isEnabled = hasVideo
+        seekBar.max = durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        renderSeekPosition(state.position)
+    }
+
+    private fun renderSeekPosition(position: Micros) {
+        // Position updates must not move the thumb while the finger is on it.
+        if (seekBarTracking) return
+        binding.seekBar.progress = (position.value / MICROS_PER_MILLI).toInt()
     }
 
     // FOOTER
     private fun bindListeners() = with(binding) {
         chooseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.ChooseFileClicked) }
         playPauseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.PlayPauseClicked) }
+        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) = Unit
+
+            override fun onStartTrackingTouch(bar: SeekBar) {
+                seekBarTracking = true
+            }
+
+            // Seek once on release, not on every drag step, so the decoder is not flushed dozens of times.
+            override fun onStopTrackingTouch(bar: SeekBar) {
+                seekBarTracking = false
+                viewModel.onEvent(PlayerEvent.SeekRequested(Micros(bar.progress * MICROS_PER_MILLI)))
+            }
+        })
     }
 
     private fun handleEffect(effect: PlayerEffect) {

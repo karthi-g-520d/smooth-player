@@ -38,6 +38,9 @@ public class PlayerViewModel(
         viewModelScope.launch {
             engine.state.collect { onEvent(PlayerEvent.EngineStateChanged(it)) }
         }
+        viewModelScope.launch {
+            engine.position.collect { onEvent(PlayerEvent.PositionChanged(it)) }
+        }
     }
 
     public fun onEvent(event: PlayerEvent) {
@@ -46,7 +49,9 @@ public class PlayerViewModel(
             PlayerEvent.ChooseFileClicked -> _effects.trySend(PlayerEffect.OpenFilePicker)
             is PlayerEvent.FileChosen -> openFile(event.uri)
             PlayerEvent.PlayPauseClicked -> togglePlayback()
+            is PlayerEvent.SeekRequested -> engine.seekTo(event.position)
             is PlayerEvent.EngineStateChanged -> Unit
+            is PlayerEvent.PositionChanged -> Unit
         }
     }
 

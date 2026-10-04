@@ -9,6 +9,8 @@ internal object PlayerReducer {
         is PlayerEvent.FileChosen -> state.copy(phase = PlayerUiState.Phase.Preparing, error = null)
         PlayerEvent.PlayPauseClicked -> state
         is PlayerEvent.EngineStateChanged -> state.fromEngine(event.state)
+        is PlayerEvent.PositionChanged -> state.copy(position = event.position)
+        is PlayerEvent.SeekRequested -> state
     }
 
     private fun PlayerUiState.fromEngine(engineState: EngineState): PlayerUiState = when (engineState) {

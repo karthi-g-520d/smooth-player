@@ -42,6 +42,9 @@ public class DefaultPlaybackEngine(
     private val _state = MutableStateFlow<EngineState>(EngineState.Idle)
     override val state: StateFlow<EngineState> = _state.asStateFlow()
 
+    private val _position = MutableStateFlow(Micros(0L))
+    override val position: StateFlow<Micros> = _position.asStateFlow()
+
     @Volatile private var source: OpenSource? = null
     private var videoDecoder: VideoDecoder? = null
     private var audioDecoder: AudioDecoder? = null
@@ -50,6 +53,7 @@ public class DefaultPlaybackEngine(
 
     override suspend fun open(uri: String) {
         closeSource()
+        _position.value = Micros(0L)
         _state.value = EngineState.Preparing
         _state.value = withContext(ioDispatcher) {
             try {
@@ -78,6 +82,27 @@ public class DefaultPlaybackEngine(
         }
     }
 
+    /**
+     * Playing stays playing. Paused, or ended, leaves the engine paused on the frame at the target. Ended
+     * is treated as paused, so the seek can land on a picture and the user can press play again.
+     */
+    override fun seekTo(position: Micros) {
+        val opened = source ?: return
+        val current = _state.value
+        if (current != EngineState.Playing && current != EngineState.Paused && current != EngineState.Ended) return
+        val target = clampToDuration(position, opened.info.durationUs)
+        if (current != EngineState.Playing) {
+            videoDecoder?.setPaused(true)
+            audioDecoder?.setPaused(true)
+            wallClock?.pause()
+            _state.value = EngineState.Paused
+        }
+        wallClock?.reset(target)
+        audioDecoder?.seekTo(target)
+        videoDecoder?.seekTo(target)
+        _position.value = target
+    }
+
     override fun release() {
         stopPlayback()
         renderer?.close()
@@ -102,6 +127,7 @@ public class DefaultPlaybackEngine(
         val videoRenderer = ensureRenderer()
         videoRenderer.setContent(opened.info)
         stopPlayback()
+        _position.value = Micros(0L)
 
         val audio = try {
             opened.audio?.let { track ->
@@ -120,6 +146,7 @@ public class DefaultPlaybackEngine(
             trackFormat = opened.video.format,
             clock = clock,
             outputSurfaceProvider = { videoRenderer.awaitFrameSurface() },
+            onFrameShown = { _position.value = it },
             onEndOfStream = { _state.value = EngineState.Ended },
             onFailure = { reason -> fail(EngineError.CodecFailed(reason, recoverable = false)) },
         )
@@ -214,6 +241,12 @@ public class DefaultPlaybackEngine(
         val trackIndex: Int,
         val format: MediaFormat,
     )
+}
+
+/** Keeps a seek inside the file. A duration of zero means the length is unknown, so only the start is enforced. */
+private fun clampToDuration(position: Micros, duration: Micros): Micros {
+    val upper = if (duration.value > 0L) duration.value else Long.MAX_VALUE
+    return Micros(position.value.coerceIn(0L, upper))
 }
 
 private fun MediaExtractor.indexOfTrackWithMimePrefix(prefix: String): Int =
