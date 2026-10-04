@@ -10,12 +10,15 @@ import com.example.smoothplayer.engine.api.RenderTargetController
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.Micros
+import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.engine.impl.clock.MasterClock
 import com.example.smoothplayer.engine.impl.clock.WallClock
 import com.example.smoothplayer.engine.impl.decoder.AudioDecoder
 import com.example.smoothplayer.engine.impl.decoder.VideoDecoder
 import com.example.smoothplayer.engine.impl.gl.VideoRenderer
+import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
+import java.io.File
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +47,12 @@ public class DefaultPlaybackEngine(
 
     private val _position = MutableStateFlow(Micros(0L))
     override val position: StateFlow<Micros> = _position.asStateFlow()
+
+    private val _stats = MutableStateFlow(PlaybackStats())
+    override val stats: StateFlow<PlaybackStats> = _stats.asStateFlow()
+
+    // One for the engine's lifetime, so the renderer and every decoder share the same counters and log file.
+    private val telemetry = FrameTelemetry(context) { _stats.value = it }
 
     @Volatile private var source: OpenSource? = null
     private var videoDecoder: VideoDecoder? = null
@@ -103,11 +112,24 @@ public class DefaultPlaybackEngine(
         _position.value = target
     }
 
+    override fun setTelemetryLogging(enabled: Boolean) {
+        if (enabled) {
+            val directory = context.getExternalFilesDir(null) ?: context.filesDir
+            val path = telemetry.startLog(File(directory, "fi-telemetry-${System.currentTimeMillis()}.csv"))
+            _stats.value = _stats.value.copy(logPath = path)
+        } else {
+            telemetry.stopLog()
+            _stats.value = _stats.value.copy(logPath = null)
+        }
+    }
+
     override fun release() {
         stopPlayback()
         renderer?.close()
         renderer = null
         closeSource()
+        telemetry.stopLog()
+        _stats.value = PlaybackStats()
         _state.value = EngineState.Idle
     }
 
@@ -120,7 +142,7 @@ public class DefaultPlaybackEngine(
     }
 
     private fun ensureRenderer(): VideoRenderer =
-        renderer ?: VideoRenderer(context.assets).also { renderer = it }
+        renderer ?: VideoRenderer(context.assets, telemetry).also { renderer = it }
 
     private fun startFromBeginning() {
         val opened = source ?: return
@@ -128,6 +150,7 @@ public class DefaultPlaybackEngine(
         videoRenderer.setContent(opened.info)
         stopPlayback()
         _position.value = Micros(0L)
+        telemetry.reset(masterIsAudio = opened.audio != null)
 
         val audio = try {
             opened.audio?.let { track ->
@@ -145,6 +168,7 @@ public class DefaultPlaybackEngine(
             trackIndex = opened.video.trackIndex,
             trackFormat = opened.video.format,
             clock = clock,
+            telemetry = telemetry,
             outputSurfaceProvider = { videoRenderer.awaitFrameSurface() },
             onFrameShown = { _position.value = it },
             onEndOfStream = { _state.value = EngineState.Ended },

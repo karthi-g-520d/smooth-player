@@ -11,6 +11,9 @@ internal object PlayerReducer {
         is PlayerEvent.EngineStateChanged -> state.fromEngine(event.state)
         is PlayerEvent.PositionChanged -> state.copy(position = event.position)
         is PlayerEvent.SeekRequested -> state
+        is PlayerEvent.StatsReceived -> state.copy(stats = event.stats)
+        PlayerEvent.StatsToggled -> state.copy(statsVisible = !state.statsVisible)
+        PlayerEvent.LoggingToggled -> state.copy(loggingEnabled = !state.loggingEnabled)
     }
 
     private fun PlayerUiState.fromEngine(engineState: EngineState): PlayerUiState = when (engineState) {

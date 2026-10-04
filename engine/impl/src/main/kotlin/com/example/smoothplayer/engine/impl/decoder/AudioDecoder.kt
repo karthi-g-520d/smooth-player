@@ -13,6 +13,8 @@ import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.impl.audio.AudioClock
 import com.example.smoothplayer.engine.impl.audio.framesBeforeTarget
 import com.example.smoothplayer.engine.impl.lifecycle.LiveResources
+import com.example.smoothplayer.engine.impl.telemetry.TraceNames
+import com.example.smoothplayer.engine.impl.telemetry.trace
 import java.util.ArrayDeque
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -198,7 +200,9 @@ internal class AudioDecoder(
                 val buffer = checkNotNull(mediaCodec.getOutputBuffer(output.index))
                 buffer.limit(output.offset + output.size)
                 buffer.position(output.offset + output.written)
-                val bytes = track.write(buffer, output.size - output.written, AudioTrack.WRITE_NON_BLOCKING)
+                val bytes = trace(TraceNames.AUDIO_WRITE) {
+                    track.write(buffer, output.size - output.written, AudioTrack.WRITE_NON_BLOCKING)
+                }
                 if (bytes < 0) {
                     onFailure(EngineError.CodecFailed("audio write failed: $bytes", recoverable = false))
                     return

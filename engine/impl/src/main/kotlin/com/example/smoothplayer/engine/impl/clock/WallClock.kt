@@ -46,4 +46,7 @@ internal class WallClock : MasterClock {
     }
 
     override fun isStalled(): Boolean = false
+
+    /** The wall clock needs no anchor, so it is always ready. */
+    override fun isReady(): Boolean = true
 }

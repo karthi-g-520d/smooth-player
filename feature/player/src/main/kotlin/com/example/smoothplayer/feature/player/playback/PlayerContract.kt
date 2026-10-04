@@ -3,6 +3,7 @@ package com.example.smoothplayer.feature.player.playback
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.Micros
+import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
 
 /** Everything the player screen renders. */
@@ -11,6 +12,9 @@ public data class PlayerUiState(
     val videoInfo: VideoInfo? = null,
     val error: EngineError? = null,
     val position: Micros = Micros(0L),
+    val stats: PlaybackStats? = null,
+    val statsVisible: Boolean = false,
+    val loggingEnabled: Boolean = false,
 ) {
     public enum class Phase { Idle, Preparing, Ready, Playing, Paused, Ended, Failed }
 }
@@ -24,6 +28,10 @@ public sealed interface PlayerEvent {
 
     /** The user let go of the seek bar at [position]. The view model forwards it to the engine. */
     public data class SeekRequested(val position: Micros) : PlayerEvent
+
+    public data class StatsReceived(val stats: PlaybackStats) : PlayerEvent
+    public data object StatsToggled : PlayerEvent
+    public data object LoggingToggled : PlayerEvent
 }
 
 public sealed interface PlayerEffect {

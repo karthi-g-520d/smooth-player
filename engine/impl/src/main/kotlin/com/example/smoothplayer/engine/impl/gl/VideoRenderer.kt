@@ -9,6 +9,9 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
 import com.example.smoothplayer.engine.api.model.VideoInfo
+import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
+import com.example.smoothplayer.engine.impl.telemetry.TraceNames
+import com.example.smoothplayer.engine.impl.telemetry.trace
 import com.example.smoothplayer.engine.impl.threading.GlThread
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -49,7 +52,10 @@ private val QUAD = floatArrayOf(
  * [awaitFrameSurface], which the decoder thread calls and which blocks that thread only.
  */
 @GlThread
-internal class VideoRenderer(private val assets: AssetManager) {
+internal class VideoRenderer(
+    private val assets: AssetManager,
+    private val telemetry: FrameTelemetry,
+) {
     private val glThread = HandlerThread(GL_THREAD_NAME).apply { start() }
     private val handler = Handler(glThread.looper)
     private val frameSurfaceReady = CountDownLatch(1)
@@ -74,6 +80,7 @@ internal class VideoRenderer(private val assets: AssetManager) {
     private var vertexArray = 0
     private var vertexBuffer = 0
     private var hasFrame = false
+    private var gpuTimers: GpuTimerRing? = null
     private val texMatrix = FloatArray(TEXTURE_MATRIX_SIZE)
     private val rotationMatrix = FloatArray(ROTATION_MATRIX_SIZE)
     private val quadBuffer: FloatBuffer = ByteBuffer.allocateDirect(QUAD.size * BYTES_PER_FLOAT)
@@ -150,6 +157,7 @@ internal class VideoRenderer(private val assets: AssetManager) {
             frameSurface = Surface(texture)
             program = linkProgram(loadAsset(VERTEX_SHADER_ASSET), loadAsset(FRAGMENT_SHADER_ASSET))
             createVertexState()
+            gpuTimers = GpuTimerRing.createIfSupported()
         } catch (e: Exception) {
             // Reported to the decoder thread by awaitFrameSurface, instead of crashing the GL thread.
             setupError = e
@@ -218,6 +226,20 @@ internal class VideoRenderer(private val assets: AssetManager) {
         GLES30.glClearColor(0f, 0f, 0f, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
+        val timers = gpuTimers
+        trace(TraceNames.GL_DRAW) {
+            if (timers != null) {
+                timers.time({ drawQuad(rotation) }, telemetry::onPresentGpu)
+            } else {
+                drawQuad(rotation)
+            }
+        }
+
+        eglCore.swapBuffers(target)
+    }
+
+    @GlThread
+    private fun drawQuad(rotation: Int) {
         GLES30.glUseProgram(program)
         GLES30.glBindVertexArray(vertexArray)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
@@ -225,8 +247,6 @@ internal class VideoRenderer(private val assets: AssetManager) {
         GLES30.glUniformMatrix2fv(UNIFORM_ROTATION, 1, false, clockwiseRotation(rotation, rotationMatrix), 0)
         GLES30.glUniformMatrix4fv(UNIFORM_TEX_MATRIX, 1, false, texMatrix, 0)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, VERTEX_COUNT)
-
-        eglCore.swapBuffers(target)
     }
 
     @GlThread
@@ -251,6 +271,8 @@ internal class VideoRenderer(private val assets: AssetManager) {
         GLES30.glDeleteBuffers(1, intArrayOf(vertexBuffer), 0)
         GLES30.glDeleteVertexArrays(1, intArrayOf(vertexArray), 0)
         GLES30.glDeleteTextures(1, intArrayOf(textureId), 0)
+        gpuTimers?.close()
+        gpuTimers = null
         eglCore.close()
         core = null
     }

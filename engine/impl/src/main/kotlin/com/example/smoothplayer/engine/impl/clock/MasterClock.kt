@@ -12,4 +12,7 @@ internal interface MasterClock {
 
     /** True once the clock can no longer advance by itself. Video stops waiting on it, so it can finish after audio. */
     fun isStalled(): Boolean
+
+    /** False until the clock has a real reference point. Before that, [nowUs] is a placeholder, not a time. */
+    fun isReady(): Boolean
 }

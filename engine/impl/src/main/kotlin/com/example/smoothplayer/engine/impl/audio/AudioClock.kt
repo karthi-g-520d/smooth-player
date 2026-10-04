@@ -42,6 +42,8 @@ internal class AudioClock(
         return Micros(audioPositionUs(point.ptsUs, point.headFrames, playedHead(), sampleRate))
     }
 
+    override fun isReady(): Boolean = anchor != null
+
     override fun isStalled(): Boolean {
         val end = endFrames ?: return false
         val point = anchor

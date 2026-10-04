@@ -11,12 +11,32 @@
         android:layout_height="wrap_content"
         android:text="@string/player_choose_file" />
 
-    <SurfaceView
-        android:id="@+id/videoSurface"
+    <!-- The stats overlay sits on top of the video, so both share one fixed-height container. The container limits how
+         tall the overlay can be, so its text is kept small enough to show every line. -->
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="2"
-        android:layout_marginTop="@dimen/dimen_player_spacing" />
+        android:layout_marginTop="@dimen/dimen_player_spacing">
+
+        <SurfaceView
+            android:id="@+id/videoSurface"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <TextView
+            android:id="@+id/statsText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:background="@android:color/black"
+            android:alpha="0.75"
+            android:padding="@dimen/dimen_player_spacing"
+            android:textSize="10sp"
+            android:textColor="@android:color/white"
+            android:fontFamily="monospace"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <SeekBar
         android:id="@+id/seekBar"
@@ -39,4 +59,25 @@
         android:layout_height="wrap_content"
         android:enabled="false"
         android:text="@string/player_play" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/dimen_player_spacing"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/statsButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/player_stats_show" />
+
+        <Button
+            android:id="@+id/logButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/player_log_start" />
+    </LinearLayout>
 </LinearLayout>
