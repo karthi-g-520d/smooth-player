@@ -11,6 +11,9 @@ import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.VideoInfo
+import com.example.smoothplayer.engine.impl.clock.MasterClock
+import com.example.smoothplayer.engine.impl.clock.WallClock
+import com.example.smoothplayer.engine.impl.decoder.AudioDecoder
 import com.example.smoothplayer.engine.impl.decoder.VideoDecoder
 import com.example.smoothplayer.engine.impl.gl.VideoRenderer
 import kotlinx.coroutines.CoroutineDispatcher
@@ -22,10 +25,11 @@ import kotlinx.coroutines.withContext
 private const val MIME_VIDEO_PREFIX = "video/"
 private const val MIME_AUDIO_PREFIX = "audio/"
 private const val NO_ROTATION_DEGREES = 0
+private const val MAX_AUDIO_CHANNELS = 2
 
 /**
- * Plays one local file into the surface it is given. Decoding is hardware, and frames are drawn as the
- * decoder produces them. Audio and A/V sync come in a later step.
+ * Plays one local file into the surface it is given. Decoding is hardware. Audio is the master clock, and
+ * video frames are shown when the audio position reaches them. A file with no audio uses the wall clock.
  *
  * Threads are created on first use. An engine that is never shown or played starts none, which matters
  * because the view model that owns this engine can outlive several activity instances.
@@ -39,7 +43,9 @@ public class DefaultPlaybackEngine(
     override val state: StateFlow<EngineState> = _state.asStateFlow()
 
     @Volatile private var source: OpenSource? = null
-    private var decoder: VideoDecoder? = null
+    private var videoDecoder: VideoDecoder? = null
+    private var audioDecoder: AudioDecoder? = null
+    private var wallClock: WallClock? = null
     private var renderer: VideoRenderer? = null
 
     override suspend fun open(uri: String) {
@@ -65,13 +71,15 @@ public class DefaultPlaybackEngine(
 
     override fun pause() {
         if (_state.value == EngineState.Playing) {
-            decoder?.setPaused(true)
+            videoDecoder?.setPaused(true)
+            audioDecoder?.setPaused(true)
+            wallClock?.pause()
             _state.value = EngineState.Paused
         }
     }
 
     override fun release() {
-        stopDecoder()
+        stopPlayback()
         renderer?.close()
         renderer = null
         closeSource()
@@ -93,53 +101,101 @@ public class DefaultPlaybackEngine(
         val opened = source ?: return
         val videoRenderer = ensureRenderer()
         videoRenderer.setContent(opened.info)
-        stopDecoder()
+        stopPlayback()
+
+        val audio = try {
+            opened.audio?.let { track ->
+                AudioDecoder(track.extractor, track.trackIndex, track.format, onFailure = ::fail)
+            }
+        } catch (e: Exception) {
+            fail(EngineError.CodecFailed(e.message ?: e.toString(), recoverable = false))
+            return
+        }
+        val clock: MasterClock = audio?.clock ?: WallClock().also { wallClock = it }
+        audioDecoder = audio
+
         val newDecoder = VideoDecoder(
-            extractor = opened.extractor,
-            trackIndex = opened.videoTrack,
-            trackFormat = opened.videoFormat,
+            extractor = opened.video.extractor,
+            trackIndex = opened.video.trackIndex,
+            trackFormat = opened.video.format,
+            clock = clock,
             outputSurfaceProvider = { videoRenderer.awaitFrameSurface() },
             onEndOfStream = { _state.value = EngineState.Ended },
-            onFailure = { reason ->
-                _state.value = EngineState.Failed(EngineError.CodecFailed(reason, recoverable = false))
-            },
+            onFailure = { reason -> fail(EngineError.CodecFailed(reason, recoverable = false)) },
         )
-        decoder = newDecoder
+        videoDecoder = newDecoder
+        audio?.start()
+        wallClock?.start()
         newDecoder.start()
         _state.value = EngineState.Playing
     }
 
     private fun resume() {
-        decoder?.setPaused(false)
+        videoDecoder?.setPaused(false)
+        audioDecoder?.setPaused(false)
+        wallClock?.resume()
         _state.value = EngineState.Playing
     }
 
-    private fun stopDecoder() {
-        decoder?.release()
-        decoder = null
+    private fun fail(error: EngineError) {
+        _state.value = EngineState.Failed(error)
+    }
+
+    /** Stops video first, because it reads the clock that audio owns. */
+    private fun stopPlayback() {
+        videoDecoder?.release()
+        videoDecoder = null
+        audioDecoder?.release()
+        audioDecoder = null
+        wallClock = null
     }
 
     private fun closeSource() {
-        stopDecoder()
-        source?.extractor?.release()
+        stopPlayback()
+        source?.let { opened ->
+            opened.video.extractor.release()
+            opened.audio?.extractor?.release()
+        }
         source = null
     }
 
     private fun openSource(uri: String): OpenSource {
+        val video = openTrack(uri, MIME_VIDEO_PREFIX) ?: error("no video track")
+        val audio = try {
+            openTrack(uri, MIME_AUDIO_PREFIX)
+        } catch (e: Throwable) {
+            video.extractor.release()
+            throw e
+        }
+        if (audio != null && audio.format.intOrDefault(MediaFormat.KEY_CHANNEL_COUNT, 0) > MAX_AUDIO_CHANNELS) {
+            audio.extractor.release()
+            video.extractor.release()
+            error("unsupported audio channel count")
+        }
+        val info = VideoInfo(
+            durationUs = Micros(video.format.longOrDefault(MediaFormat.KEY_DURATION, 0L)),
+            width = video.format.intOrDefault(MediaFormat.KEY_WIDTH, 0),
+            height = video.format.intOrDefault(MediaFormat.KEY_HEIGHT, 0),
+            rotationDegrees = video.format.intOrDefault(MediaFormat.KEY_ROTATION, NO_ROTATION_DEGREES),
+            hasAudio = audio != null,
+        )
+        return OpenSource(video, audio, info)
+    }
+
+    /**
+     * Opens its own extractor on the first track with [mimePrefix]. Each decoder gets a separate extractor,
+     * so neither has to route the other's samples. Returns null when the file has no such track.
+     */
+    private fun openTrack(uri: String, mimePrefix: String): TrackSource? {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(context, Uri.parse(uri), null)
-            val videoTrack = extractor.indexOfTrackWithMimePrefix(MIME_VIDEO_PREFIX)
-            check(videoTrack >= 0) { "no video track" }
-            val format = extractor.getTrackFormat(videoTrack)
-            val info = VideoInfo(
-                durationUs = Micros(format.longOrDefault(MediaFormat.KEY_DURATION, 0L)),
-                width = format.intOrDefault(MediaFormat.KEY_WIDTH, 0),
-                height = format.intOrDefault(MediaFormat.KEY_HEIGHT, 0),
-                rotationDegrees = format.intOrDefault(MediaFormat.KEY_ROTATION, NO_ROTATION_DEGREES),
-                hasAudio = extractor.indexOfTrackWithMimePrefix(MIME_AUDIO_PREFIX) >= 0,
-            )
-            return OpenSource(extractor, videoTrack, format, info)
+            val index = extractor.indexOfTrackWithMimePrefix(mimePrefix)
+            if (index < 0) {
+                extractor.release()
+                return null
+            }
+            return TrackSource(extractor, index, extractor.getTrackFormat(index))
         } catch (e: Throwable) {
             extractor.release()
             throw e
@@ -148,10 +204,15 @@ public class DefaultPlaybackEngine(
 
     /** Everything needed to decode a file, kept from [open] until the next open or [release]. */
     private class OpenSource(
-        val extractor: MediaExtractor,
-        val videoTrack: Int,
-        val videoFormat: MediaFormat,
+        val video: TrackSource,
+        val audio: TrackSource?,
         val info: VideoInfo,
+    )
+
+    private class TrackSource(
+        val extractor: MediaExtractor,
+        val trackIndex: Int,
+        val format: MediaFormat,
     )
 }
 
