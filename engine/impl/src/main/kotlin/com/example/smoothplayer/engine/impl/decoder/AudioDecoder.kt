@@ -12,6 +12,7 @@ import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.impl.audio.AudioClock
 import com.example.smoothplayer.engine.impl.audio.framesBeforeTarget
+import com.example.smoothplayer.engine.impl.lifecycle.LiveResources
 import java.util.ArrayDeque
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -162,7 +163,7 @@ internal class AudioDecoder(
                 releaseCodec()
                 pendingOutputs.clear()
                 runCatching { track.stop() }
-                track.release()
+                closeTrack(track)
             } finally {
                 done.countDown()
             }
@@ -174,19 +175,14 @@ internal class AudioDecoder(
     /** Creates, configures and starts a codec for [trackFormat], then makes it the current one. */
     private fun startCodec() {
         val mime = checkNotNull(trackFormat.getString(MediaFormat.KEY_MIME))
-        val mediaCodec = MediaCodec.createDecoderByType(mime)
-        mediaCodec.setCallback(callback, handler)
-        mediaCodec.configure(trackFormat, null, null, 0)
-        mediaCodec.start()
-        codec = mediaCodec
+        codec = startDecoder(mime, callback, handler, trackFormat, surface = null)
     }
 
     /** Detaches the current codec first, so any callbacks it still posts are recognised as stale. */
     private fun releaseCodec() {
         val old = codec ?: return
         codec = null
-        runCatching { old.stop() }
-        old.release()
+        closeDecoder(old)
     }
 
     private fun isCurrent(mediaCodec: MediaCodec): Boolean = mediaCodec === codec
@@ -266,7 +262,16 @@ internal class AudioDecoder(
             .setBufferSizeInBytes(minBufferBytes * BUFFER_MULTIPLIER)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        check(created.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack did not initialize" }
+        LiveResources.audioTrackOpened()
+        if (created.state != AudioTrack.STATE_INITIALIZED) {
+            closeTrack(created)
+            error("AudioTrack did not initialize")
+        }
         return created
+    }
+
+    private fun closeTrack(audioTrack: AudioTrack) {
+        audioTrack.release()
+        LiveResources.audioTrackClosed()
     }
 }
