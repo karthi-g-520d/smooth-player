@@ -5,10 +5,14 @@ import android.graphics.SurfaceTexture
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES30
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
+import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.VideoInfo
+import com.example.smoothplayer.engine.impl.clock.MasterClock
+import com.example.smoothplayer.engine.impl.pacer.VsyncPacer
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
 import com.example.smoothplayer.engine.impl.telemetry.TraceNames
 import com.example.smoothplayer.engine.impl.telemetry.trace
@@ -35,6 +39,14 @@ private const val FRAGMENT_SHADER_ASSET = "shaders/oes_passthrough.frag"
 private const val TEXTURE_MATRIX_SIZE = 16
 private const val ROTATION_MATRIX_SIZE = 4
 private const val QUAD_HALF_EXTENT = 1f
+private const val NANOS_PER_MICRO = 1_000L
+private const val TARGET_REFRESH_HZ = 60f
+
+/**
+ * Diagnostic switch for the GPU present timer. Turning it off removes the per-draw timer query and its
+ * disjoint check, so a trace shows whether those calls are what makes the draw slow.
+ */
+internal const val GPU_TIMERS_ENABLED = true
 
 // x, y, u, v per vertex, as a triangle strip covering clip space.
 private val QUAD = floatArrayOf(
@@ -81,6 +93,9 @@ internal class VideoRenderer(
     private var vertexBuffer = 0
     private var hasFrame = false
     private var gpuTimers: GpuTimerRing? = null
+    @Volatile private var pacer: VsyncPacer? = null
+    private var paced = false
+    private var latestPtsNs = 0L
     private val texMatrix = FloatArray(TEXTURE_MATRIX_SIZE)
     private val rotationMatrix = FloatArray(ROTATION_MATRIX_SIZE)
     private val quadBuffer: FloatBuffer = ByteBuffer.allocateDirect(QUAD.size * BYTES_PER_FLOAT)
@@ -113,6 +128,7 @@ internal class VideoRenderer(
     fun attachWindow(surface: Surface, width: Int, height: Int) {
         handler.post {
             val eglCore = core ?: return@post
+            requestRefreshRate(surface)
             detachWindowOnGlThread()
             windowSurface = eglCore.createWindowSurface(surface)
             windowWidth = width
@@ -124,6 +140,58 @@ internal class VideoRenderer(
     /** Stops drawing and destroys the window surface. Blocks until that has happened, so the Surface can be released. */
     fun detachWindow() {
         awaitGlThread { detachWindowOnGlThread() }
+    }
+
+    /**
+     * Starts drawing on the display's vsync. The decoder then releases each frame when the screen is about to show it.
+     * [clock] is the playback's master clock.
+     */
+    fun startPacing(clock: MasterClock, onTick: () -> Unit) {
+        handler.post {
+            paced = true
+            pacer?.start(clock, onTick)
+        }
+    }
+
+    /** Stops vsync drawing. Frames are then drawn as they arrive, and the decoder falls back to the clock. */
+    fun stopPacing() {
+        handler.post {
+            paced = false
+            pacer?.stop()
+        }
+    }
+
+    /**
+     * Stops vsync drawing and waits until the GL thread has done so. Call this before releasing the clock's audio
+     * track, because a vsync callback that is already queued would otherwise read the released track.
+     */
+    fun stopPacingAndWait() {
+        awaitGlThread {
+            paced = false
+            pacer?.stopNow()
+        }
+    }
+
+    /** The content time that the next vsync will show, or null when not pacing. Read from the decoder thread. */
+    fun releaseTargetUs(): Micros? = pacer?.releaseTargetUs
+
+    /** Draws the newest frame on this vsync, with presentation time set so the compositor shows it at [presentNs]. */
+    @GlThread
+    private fun onVsync(presentNs: Long, periodNs: Long) {
+        if (!hasFrame || windowSurface == null) return
+        drawFrame(presentNs)
+        telemetry.onVsyncDraw(latestPtsNs / NANOS_PER_MICRO, periodNs, pacer?.displayContentUsOrNull(presentNs))
+    }
+
+    /** Asks the compositor for the target refresh rate. Only the device's own choice of rate decides what is shown. */
+    @GlThread
+    private fun requestRefreshRate(surface: Surface) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        surface.setFrameRate(
+            TARGET_REFRESH_HZ,
+            Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+            Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS,
+        )
     }
 
     /** Releases all GL resources and stops the thread. Blocks briefly. Call after the decoder is released. */
@@ -157,7 +225,8 @@ internal class VideoRenderer(
             frameSurface = Surface(texture)
             program = linkProgram(loadAsset(VERTEX_SHADER_ASSET), loadAsset(FRAGMENT_SHADER_ASSET))
             createVertexState()
-            gpuTimers = GpuTimerRing.createIfSupported()
+            gpuTimers = if (GPU_TIMERS_ENABLED) GpuTimerRing.createIfSupported() else null
+            pacer = VsyncPacer(handler) { presentNs, periodNs -> onVsync(presentNs, periodNs) }
         } catch (e: Exception) {
             // Reported to the decoder thread by awaitFrameSurface, instead of crashing the GL thread.
             setupError = e
@@ -205,14 +274,16 @@ internal class VideoRenderer(
         val texture = surfaceTexture ?: return
         // updateTexImage needs a current context. The pbuffer is enough, the window is not required.
         core?.makeCurrent()
-        texture.updateTexImage()
+        trace(TraceNames.GL_UPDATE) { texture.updateTexImage() }
         texture.getTransformMatrix(texMatrix)
+        latestPtsNs = texture.timestamp
         hasFrame = true
-        drawFrame()
+        // While pacing, the vsync callback draws. Otherwise draw now, as when paused.
+        if (!paced) drawFrame()
     }
 
     @GlThread
-    private fun drawFrame() {
+    private fun drawFrame(presentNs: Long? = null) {
         val eglCore = core ?: return
         val target = windowSurface ?: return
         eglCore.makeCurrent(target)
@@ -235,7 +306,7 @@ internal class VideoRenderer(
             }
         }
 
-        eglCore.swapBuffers(target)
+        trace(TraceNames.GL_SWAP) { eglCore.swapBuffers(target, presentNs) }
     }
 
     @GlThread
@@ -271,6 +342,8 @@ internal class VideoRenderer(
         GLES30.glDeleteBuffers(1, intArrayOf(vertexBuffer), 0)
         GLES30.glDeleteVertexArrays(1, intArrayOf(vertexArray), 0)
         GLES30.glDeleteTextures(1, intArrayOf(textureId), 0)
+        pacer?.stop()
+        paced = false
         gpuTimers?.close()
         gpuTimers = null
         eglCore.close()

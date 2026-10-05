@@ -16,5 +16,9 @@ public data class PlaybackStats(
     val presentGpuP95: Nanos? = null,
     val refreshHz: Float = 0f,
     val thermalHeadroom: Float? = null,
+    /** Percent of content frames, over the last second, that stayed on screen for exactly the expected number of refreshes. */
+    val cadenceExactPercent: Float? = null,
+    /** The same percentage, over the whole playback so far. */
+    val cadenceAverageExactPercent: Float? = null,
     val logPath: String? = null,
 )

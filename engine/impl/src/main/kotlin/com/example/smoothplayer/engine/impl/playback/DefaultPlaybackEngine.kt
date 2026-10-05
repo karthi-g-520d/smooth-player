@@ -84,6 +84,7 @@ public class DefaultPlaybackEngine(
 
     override fun pause() {
         if (_state.value == EngineState.Playing) {
+            renderer?.stopPacing()
             videoDecoder?.setPaused(true)
             audioDecoder?.setPaused(true)
             wallClock?.pause()
@@ -101,6 +102,7 @@ public class DefaultPlaybackEngine(
         if (current != EngineState.Playing && current != EngineState.Paused && current != EngineState.Ended) return
         val target = clampToDuration(position, opened.info.durationUs)
         if (current != EngineState.Playing) {
+            renderer?.stopPacing()
             videoDecoder?.setPaused(true)
             audioDecoder?.setPaused(true)
             wallClock?.pause()
@@ -168,6 +170,7 @@ public class DefaultPlaybackEngine(
             trackIndex = opened.video.trackIndex,
             trackFormat = opened.video.format,
             clock = clock,
+            releaseTargetUs = { videoRenderer.releaseTargetUs() ?: clock.nowUs() },
             telemetry = telemetry,
             outputSurfaceProvider = { videoRenderer.awaitFrameSurface() },
             onFrameShown = { _position.value = it },
@@ -178,6 +181,7 @@ public class DefaultPlaybackEngine(
         audio?.start()
         wallClock?.start()
         newDecoder.start()
+        videoRenderer.startPacing(clock) { videoDecoder?.onVsyncTick() }
         _state.value = EngineState.Playing
     }
 
@@ -185,6 +189,8 @@ public class DefaultPlaybackEngine(
         videoDecoder?.setPaused(false)
         audioDecoder?.setPaused(false)
         wallClock?.resume()
+        val clock: MasterClock? = audioDecoder?.clock ?: wallClock
+        if (clock != null) renderer?.startPacing(clock) { videoDecoder?.onVsyncTick() }
         _state.value = EngineState.Playing
     }
 
@@ -192,8 +198,12 @@ public class DefaultPlaybackEngine(
         _state.value = EngineState.Failed(error)
     }
 
-    /** Stops video first, because it reads the clock that audio owns. */
+    /**
+     * Stops in dependency order. The vsync pacer reads the audio clock, so it stops first, and only then is the audio
+     * track released. Video follows, because it reads the clock too.
+     */
     private fun stopPlayback() {
+        renderer?.stopPacingAndWait()
         videoDecoder?.release()
         videoDecoder = null
         audioDecoder?.release()

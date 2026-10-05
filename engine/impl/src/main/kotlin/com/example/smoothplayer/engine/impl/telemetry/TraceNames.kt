@@ -7,6 +7,8 @@ internal object TraceNames {
     const val VIDEO_RELEASE = "FI:video:release"
     const val AUDIO_WRITE = "FI:audio:write"
     const val GL_DRAW = "FI:gl:draw"
+    const val GL_UPDATE = "FI:gl:update"
+    const val GL_SWAP = "FI:gl:swap"
 }
 
 /** Runs [block] inside a trace section. The section is always closed, even when [block] throws. */

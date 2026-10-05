@@ -43,7 +43,12 @@ internal class EglCore private constructor(
         EGL14.eglDestroySurface(display, target)
     }
 
-    fun swapBuffers(target: EGLSurface) {
+    /**
+     * Swaps [target]. When [presentNs] is given, asks the compositor to show the frame at that time
+     * (EGL_ANDROID_presentation_time). Devices without the extension ignore the request.
+     */
+    fun swapBuffers(target: EGLSurface, presentNs: Long? = null) {
+        if (presentNs != null) EGLExt.eglPresentationTimeANDROID(display, target, presentNs)
         check(EGL14.eglSwapBuffers(display, target)) { eglFailure("eglSwapBuffers") }
     }
 
