@@ -19,22 +19,30 @@ private const val RING_SIZE = 4
 @GlThread
 internal class GpuTimerRing private constructor(private val queries: IntArray) {
     private var passes = 0L
+    private var samples = 0L
 
     /**
-     * Times [pass]. The result for an earlier pass is delivered through [onResult] when it is ready.
+     * Times [pass] on one call in [SAMPLE_EVERY]. Other calls just run [pass]. The result for an earlier sample is
+     * delivered through [onResult] when it is ready. Timing every pass stalled every draw, because reading the
+     * disjoint flag waits on the GPU, so the cost is paid on a sample only.
      */
     fun time(pass: () -> Unit, onResult: (Nanos) -> Unit) {
-        val slot = (passes % RING_SIZE).toInt()
+        val sampled = passes++ % SAMPLE_EVERY == 0L
+        if (!sampled) {
+            pass()
+            return
+        }
+        val slot = (samples % RING_SIZE).toInt()
         GLES30.glBeginQuery(GL_TIME_ELAPSED_EXT, queries[slot])
         pass()
         GLES30.glEndQuery(GL_TIME_ELAPSED_EXT)
-        passes++
-        readOlderPass(onResult)
+        samples++
+        readOlderSample(onResult)
     }
 
-    private fun readOlderPass(onResult: (Nanos) -> Unit) {
-        if (passes <= READ_LAG) return
-        val slot = ((passes - 1 - READ_LAG) % RING_SIZE).toInt()
+    private fun readOlderSample(onResult: (Nanos) -> Unit) {
+        if (samples <= READ_LAG) return
+        val slot = ((samples - 1 - READ_LAG) % RING_SIZE).toInt()
         val query = queries[slot]
 
         val available = IntArray(1)
@@ -55,6 +63,7 @@ internal class GpuTimerRing private constructor(private val queries: IntArray) {
 
     companion object {
         private const val READ_LAG = 2
+        private const val SAMPLE_EVERY = 30L
         private const val UINT_MASK = 0xFFFF_FFFFL
 
         /** Null when the device does not offer the extension. Callers then skip timing and report it as unavailable. */

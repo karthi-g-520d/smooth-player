@@ -43,6 +43,7 @@ internal class VideoDecoder(
     private val trackIndex: Int,
     private val trackFormat: MediaFormat,
     private val clock: MasterClock,
+    private val releaseTargetUs: () -> Micros,
     private val telemetry: FrameTelemetry,
     private val outputSurfaceProvider: () -> Surface,
     private val onFrameShown: (Micros) -> Unit,
@@ -97,6 +98,14 @@ internal class VideoDecoder(
                 onFailure(e.message ?: e.toString())
             }
         }
+    }
+
+    /**
+     * Called on every vsync, once the pacer has published its target. Releases any frame the target now covers.
+     * Releases happen right after the vsync, so every frame switch lands on the same side of a vsync.
+     */
+    fun onVsyncTick() {
+        handler.post { releaseHeldOutputs() }
     }
 
     /** Holds decoding when [value] is true, and resumes it when false. */
@@ -174,13 +183,14 @@ internal class VideoDecoder(
         while (canDecode() && heldOutputs.isNotEmpty()) {
             val output = heldOutputs.first()
             val target = seekTargetUs
-            val clockUs = clock.nowUs()
             val discardForSeek = target != null && output.ptsUs < target
+            // Pacing decides against the content time the next vsync will show. Without pacing, the clock decides.
+            val releaseClockUs = releaseTargetUs()
             val decision = when {
                 output.isEmptyEnd -> FrameDecision.Render
                 discardForSeek -> FrameDecision.Drop
                 target != null -> FrameDecision.Render
-                else -> decideFrame(output.ptsUs, clockUs, clock.isStalled())
+                else -> decideFrame(output.ptsUs, releaseClockUs, clock.isStalled())
             }
             if (decision is FrameDecision.Wait) {
                 handler.postDelayed(pollHeldOutputs, maxOf(1L, decision.delayUs / MICROS_PER_MILLI))
@@ -193,10 +203,8 @@ internal class VideoDecoder(
             if (!output.isEmptyEnd && !discardForSeek) {
                 telemetry.onFrameReleased(
                     ptsUs = output.ptsUs,
-                    clockUs = clockUs,
                     rendered = render,
                     releaseNs = System.nanoTime(),
-                    clockReady = clock.isReady() && !paused,
                 )
             }
             if (render) onFrameShown(output.ptsUs)

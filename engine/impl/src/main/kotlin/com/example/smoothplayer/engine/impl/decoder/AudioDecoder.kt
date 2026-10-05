@@ -125,8 +125,12 @@ internal class AudioDecoder(
             paused = value
             if (value) {
                 if (started) track.pause()
+                clock.setPlaying(false)
             } else {
-                if (started) track.play()
+                if (started) {
+                    track.play()
+                    clock.setPlaying(true)
+                }
                 writePending()
             }
         }
@@ -144,6 +148,7 @@ internal class AudioDecoder(
             handler.removeCallbacks(retryWrite)
             started = false
             track.pause()
+            clock.setPlaying(false)
             track.flush()
             extractor.seekTo(target.value, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             feeder.reset()
@@ -244,6 +249,7 @@ internal class AudioDecoder(
         started = true
         writtenFrames = 0L
         track.play()
+        clock.setPlaying(true)
     }
 
     private fun createTrack(): AudioTrack {

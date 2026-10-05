@@ -116,8 +116,17 @@ public class PlayerFragment(
             presentGpuP95?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
             refreshHz,
             thermalHeadroom?.let { getString(R.string.player_stats_thermal, it) } ?: notAvailable(),
+            cadenceText(),
         )
         return logPath?.let { "$text\n${getString(R.string.player_log_saved, it)}" } ?: text
+    }
+
+    /** The current one-second cadence, with the whole-playback average beside it once there is one. */
+    private fun PlaybackStats.cadenceText(): String {
+        val current = cadenceExactPercent?.let { getString(R.string.player_stats_percent, it) } ?: notAvailable()
+        val average = cadenceAverageExactPercent ?: return current
+        // One decimal, because the acceptance bar is 99.5% and whole percents cannot show whether it is met.
+        return getString(R.string.player_stats_cadence, current, getString(R.string.player_stats_percent_precise, average))
     }
 
     private fun notAvailable(): String = getString(R.string.player_stats_na)
