@@ -3,7 +3,10 @@ package com.example.smoothplayer.feature.player.playback
 import android.os.Bundle
 import android.view.SurfaceHolder
 import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
 import android.widget.SeekBar
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
@@ -11,6 +14,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.smoothplayer.engine.api.model.EngineError
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
@@ -26,12 +30,16 @@ private const val NANOS_PER_MILLI = 1_000_000.0
 /**
  * Thin view: launches the file picker, forwards clicks and surface events, and renders [PlayerUiState].
  *
+ * [onFullscreenChanged] lets the host screen hide its own panes and system bars. The player cannot do that from
+ * inside its own view, because the host owns the layout around it.
+ *
  * See the ValidFragment note on [com.example.smoothplayer.feature.player.capability.CapabilityFragment]:
  * the same custom FragmentFactory covers this fragment too.
  */
 @Suppress("ValidFragment")
 public class PlayerFragment(
     private val viewModelFactory: ViewModelProvider.Factory,
+    private val onFullscreenChanged: (Boolean) -> Unit,
 ) : Fragment(R.layout.fragment_player) {
 
     // HEADER
@@ -46,6 +54,17 @@ public class PlayerFragment(
 
     // True while the finger is on the seek bar. Position updates must not move the thumb under it.
     private var seekBarTracking = false
+
+    // Back leaves full screen rather than leaving the screen. Enabled only while full screen.
+    private val exitFullscreenOnBack = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            viewModel.onEvent(PlayerEvent.FullscreenToggled)
+        }
+    }
+
+    // The full-screen layout last applied to the views. Render runs on every position tick, so the layout is only
+    // changed when this value changes. Null means the views have not been laid out for either state yet.
+    private var appliedFullscreen: Boolean? = null
 
     // Surface events go to the view model's render target, not to a new one. See PlayerViewModel.
     private val surfaceCallback = object : SurfaceHolder.Callback {
@@ -65,6 +84,7 @@ public class PlayerFragment(
         _binding = FragmentPlayerBinding.bind(view)
         bindListeners()
         binding.videoSurface.holder.addCallback(surfaceCallback)
+        requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner, exitFullscreenOnBack)
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch { viewModel.uiState.collect(::render) }
@@ -95,6 +115,14 @@ public class PlayerFragment(
         seekBar.max = durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         renderSeekPosition(state.position)
         renderStats(state)
+        modeButton.setText(
+            if (state.interpolation == InterpolationMode.Blend) {
+                R.string.player_mode_blend
+            } else {
+                R.string.player_mode_duplicate
+            },
+        )
+        renderFullscreen(state.fullscreen)
     }
 
     private fun renderStats(state: PlayerUiState) = with(binding) {
@@ -102,6 +130,47 @@ public class PlayerFragment(
         logButton.setText(if (state.loggingEnabled) R.string.player_log_stop else R.string.player_log_start)
         statsText.visibility = if (state.statsVisible) View.VISIBLE else View.GONE
         statsText.text = state.stats?.toOverlayText() ?: getString(R.string.player_stats_waiting)
+    }
+
+    /**
+     * Full screen keeps the picture and the transport (seek, play, mode) and hides the file button, the info line
+     * and the stats row. The picture then takes the height that is left.
+     */
+    private fun renderFullscreen(fullscreen: Boolean) {
+        if (fullscreen == appliedFullscreen) return
+        appliedFullscreen = fullscreen
+        onFullscreenChanged(fullscreen)
+        exitFullscreenOnBack.isEnabled = fullscreen
+        with(binding) {
+            val spacing = resources.getDimensionPixelSize(R.dimen.dimen_player_spacing)
+            val videoHeight = resources.getDimensionPixelSize(R.dimen.dimen_player_video_height)
+            playerContent.layoutParams = playerContent.layoutParams.apply {
+                height = if (fullscreen) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT
+            }
+            val padding = if (fullscreen) 0 else spacing
+            playerContent.setPadding(padding, padding, padding, padding)
+            videoContainer.layoutParams = (videoContainer.layoutParams as LinearLayout.LayoutParams).apply {
+                if (fullscreen) {
+                    height = 0
+                    weight = 1f
+                    topMargin = 0
+                } else {
+                    height = videoHeight
+                    weight = 0f
+                    topMargin = spacing
+                }
+            }
+            chooseButton.setShown(!fullscreen)
+            infoText.setShown(!fullscreen)
+            controlsRow.setShown(!fullscreen)
+            fullscreenButton.setText(
+                if (fullscreen) R.string.player_fullscreen_exit else R.string.player_fullscreen_enter,
+            )
+        }
+    }
+
+    private fun View.setShown(shown: Boolean) {
+        visibility = if (shown) View.VISIBLE else View.GONE
     }
 
     private fun PlaybackStats.toOverlayText(): String {
@@ -143,6 +212,8 @@ public class PlayerFragment(
         playPauseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.PlayPauseClicked) }
         statsButton.setOnClickListener { viewModel.onEvent(PlayerEvent.StatsToggled) }
         logButton.setOnClickListener { viewModel.onEvent(PlayerEvent.LoggingToggled) }
+        modeButton.setOnClickListener { viewModel.onEvent(PlayerEvent.InterpolationToggled) }
+        fullscreenButton.setOnClickListener { viewModel.onEvent(PlayerEvent.FullscreenToggled) }
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) = Unit
 
@@ -167,6 +238,7 @@ public class PlayerFragment(
     override fun onDestroyView() {
         _binding?.videoSurface?.holder?.removeCallback(surfaceCallback)
         _binding = null
+        appliedFullscreen = null
         super.onDestroyView()
     }
 

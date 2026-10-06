@@ -9,6 +9,7 @@ import com.example.smoothplayer.engine.api.PlaybackEngine
 import com.example.smoothplayer.engine.api.RenderTargetController
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
@@ -55,6 +56,7 @@ public class DefaultPlaybackEngine(
     private val telemetry = FrameTelemetry(context) { _stats.value = it }
 
     @Volatile private var source: OpenSource? = null
+    @Volatile private var interpolation = InterpolationMode.Duplicate
     private var videoDecoder: VideoDecoder? = null
     private var audioDecoder: AudioDecoder? = null
     private var wallClock: WallClock? = null
@@ -125,6 +127,11 @@ public class DefaultPlaybackEngine(
         }
     }
 
+    override fun setInterpolationMode(mode: InterpolationMode) {
+        interpolation = mode
+        renderer?.setInterpolationMode(mode)
+    }
+
     override fun release() {
         stopPlayback()
         renderer?.close()
@@ -144,7 +151,7 @@ public class DefaultPlaybackEngine(
     }
 
     private fun ensureRenderer(): VideoRenderer =
-        renderer ?: VideoRenderer(context.assets, telemetry).also { renderer = it }
+        renderer ?: VideoRenderer(context.assets, telemetry, interpolation).also { renderer = it }
 
     private fun startFromBeginning() {
         val opened = source ?: return
@@ -171,12 +178,14 @@ public class DefaultPlaybackEngine(
             trackFormat = opened.video.format,
             clock = clock,
             releaseTargetUs = { videoRenderer.releaseTargetUs() ?: clock.nowUs() },
+            blendsAhead = { videoRenderer.isBlending },
             telemetry = telemetry,
             outputSurfaceProvider = { videoRenderer.awaitFrameSurface() },
             onFrameShown = { _position.value = it },
             onEndOfStream = { _state.value = EngineState.Ended },
             onFailure = { reason -> fail(EngineError.CodecFailed(reason, recoverable = false)) },
         )
+        videoRenderer.onFrameCopied = { newDecoder.onFrameCopied() }
         videoDecoder = newDecoder
         audio?.start()
         wallClock?.start()

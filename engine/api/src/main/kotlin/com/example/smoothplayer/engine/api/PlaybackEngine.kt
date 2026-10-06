@@ -1,6 +1,7 @@
 package com.example.smoothplayer.engine.api
 
 import com.example.smoothplayer.engine.api.model.EngineState
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +40,13 @@ public interface PlaybackEngine {
      * path is reported in [stats]. Turning logging on mid-playback starts writing from the next frame.
      */
     public fun setTelemetryLogging(enabled: Boolean)
+
+    /**
+     * Chooses how each refresh's frame is picked. Takes effect on the next refresh, and playback keeps going.
+     * [InterpolationMode.Blend] decodes one frame ahead of the screen, so the frame after the current one is ready
+     * when a blend needs it.
+     */
+    public fun setInterpolationMode(mode: InterpolationMode)
 
     /** Releases all resources. The engine cannot be reused after this; create a new instance. */
     public fun release()

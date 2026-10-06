@@ -54,6 +54,8 @@ public class PlayerViewModel(
             PlayerEvent.PlayPauseClicked -> togglePlayback()
             is PlayerEvent.SeekRequested -> engine.seekTo(event.position)
             PlayerEvent.LoggingToggled -> engine.setTelemetryLogging(_uiState.value.loggingEnabled)
+            PlayerEvent.InterpolationToggled -> engine.setInterpolationMode(_uiState.value.interpolation)
+            PlayerEvent.FullscreenToggled -> Unit
             is PlayerEvent.EngineStateChanged -> Unit
             is PlayerEvent.PositionChanged -> Unit
             is PlayerEvent.StatsReceived -> Unit

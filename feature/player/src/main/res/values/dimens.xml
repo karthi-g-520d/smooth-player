@@ -2,4 +2,6 @@
 <resources>
     <dimen name="dimen_capability_spacing">16dp</dimen>
     <dimen name="dimen_player_spacing">16dp</dimen>
+    <!-- Tall enough for a 16:9 picture at phone width, and for every line of the stats overlay. -->
+    <dimen name="dimen_player_video_height">240dp</dimen>
 </resources>
