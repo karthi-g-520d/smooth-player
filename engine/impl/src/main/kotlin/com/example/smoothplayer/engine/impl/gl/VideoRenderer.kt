@@ -272,7 +272,8 @@ internal class VideoRenderer(
     /** Asks the compositor for the target refresh rate. Only the device's own choice of rate decides what is shown. */
     @GlThread
     private fun requestRefreshRate(surface: Surface) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        // The three-argument setFrameRate is API 31. The two-argument form from API 30 is not used here.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
         surface.setFrameRate(
             TARGET_REFRESH_HZ,
             Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
