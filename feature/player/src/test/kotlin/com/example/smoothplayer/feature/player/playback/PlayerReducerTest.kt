@@ -2,6 +2,7 @@ package com.example.smoothplayer.feature.player.playback
 
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
@@ -85,6 +86,20 @@ class PlayerReducerTest {
         val logging = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.LoggingToggled)
         assertEquals(true, logging.loggingEnabled)
         assertEquals(false, PlayerReducer.reduce(logging, PlayerEvent.LoggingToggled).loggingEnabled)
+    }
+
+    @Test
+    fun `the interpolation toggle switches between duplicate and blend, starting from duplicate`() {
+        val blend = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.InterpolationToggled)
+        assertEquals(InterpolationMode.Blend, blend.interpolation)
+        assertEquals(InterpolationMode.Duplicate, PlayerReducer.reduce(blend, PlayerEvent.InterpolationToggled).interpolation)
+    }
+
+    @Test
+    fun `the fullscreen toggle switches full screen on and off`() {
+        val full = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.FullscreenToggled)
+        assertEquals(true, full.fullscreen)
+        assertEquals(false, PlayerReducer.reduce(full, PlayerEvent.FullscreenToggled).fullscreen)
     }
 
     @Test

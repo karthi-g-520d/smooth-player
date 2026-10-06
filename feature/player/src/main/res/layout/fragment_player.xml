@@ -1,83 +1,107 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- The player pane shares the screen with the capability report, so its controls scroll rather than squeezing the video. -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="@dimen/dimen_player_spacing">
-
-    <Button
-        android:id="@+id/chooseButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/player_choose_file" />
-
-    <!-- The stats overlay sits on top of the video, so both share one fixed-height container. The container limits how
-         tall the overlay can be, so its text is kept small enough to show every line. -->
-    <FrameLayout
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="2"
-        android:layout_marginTop="@dimen/dimen_player_spacing">
-
-        <SurfaceView
-            android:id="@+id/videoSurface"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-
-        <TextView
-            android:id="@+id/statsText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="top|start"
-            android:background="@android:color/black"
-            android:alpha="0.75"
-            android:padding="@dimen/dimen_player_spacing"
-            android:textSize="10sp"
-            android:textColor="@android:color/white"
-            android:fontFamily="monospace"
-            android:visibility="gone" />
-    </FrameLayout>
-
-    <SeekBar
-        android:id="@+id/seekBar"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:enabled="false" />
-
-    <TextView
-        android:id="@+id/infoText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/dimen_player_spacing"
-        android:layout_marginBottom="@dimen/dimen_player_spacing"
-        android:fontFamily="monospace"
-        android:textIsSelectable="true" />
-
-    <Button
-        android:id="@+id/playPauseButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:enabled="false"
-        android:text="@string/player_play" />
+    android:fillViewport="true">
 
     <LinearLayout
+        android:id="@+id/playerContent"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/dimen_player_spacing"
-        android:orientation="horizontal">
+        android:orientation="vertical"
+        android:padding="@dimen/dimen_player_spacing">
 
         <Button
-            android:id="@+id/statsButton"
-            android:layout_width="0dp"
+            android:id="@+id/chooseButton"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/player_stats_show" />
+            android:text="@string/player_choose_file" />
+
+        <!-- The stats overlay sits on top of the video, so both share one fixed-height container. The container limits how
+             tall the overlay can be, so its text is kept small enough to show every line. -->
+        <FrameLayout
+            android:id="@+id/videoContainer"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/dimen_player_video_height"
+            android:layout_marginTop="@dimen/dimen_player_spacing">
+
+            <SurfaceView
+                android:id="@+id/videoSurface"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <TextView
+                android:id="@+id/statsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|start"
+                android:background="@android:color/black"
+                android:alpha="0.75"
+                android:padding="@dimen/dimen_player_spacing"
+                android:textSize="10sp"
+                android:textColor="@android:color/white"
+                android:fontFamily="monospace"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/fullscreenButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|end"
+                android:layout_margin="@dimen/dimen_player_spacing"
+                android:text="@string/player_fullscreen_enter" />
+        </FrameLayout>
+
+        <SeekBar
+            android:id="@+id/seekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:enabled="false" />
+
+        <TextView
+            android:id="@+id/infoText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/dimen_player_spacing"
+            android:layout_marginBottom="@dimen/dimen_player_spacing"
+            android:fontFamily="monospace"
+            android:textIsSelectable="true" />
 
         <Button
-            android:id="@+id/logButton"
-            android:layout_width="0dp"
+            android:id="@+id/playPauseButton"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/player_log_start" />
+            android:enabled="false"
+            android:text="@string/player_play" />
+
+        <Button
+            android:id="@+id/modeButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/dimen_player_spacing"
+            android:text="@string/player_mode_duplicate" />
+
+        <LinearLayout
+            android:id="@+id/controlsRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/dimen_player_spacing"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/statsButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/player_stats_show" />
+
+            <Button
+                android:id="@+id/logButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/player_log_start" />
+        </LinearLayout>
     </LinearLayout>
-</LinearLayout>
+</ScrollView>

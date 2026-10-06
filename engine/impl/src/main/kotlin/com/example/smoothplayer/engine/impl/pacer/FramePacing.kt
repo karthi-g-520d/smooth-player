@@ -34,3 +34,10 @@ internal fun decideFrame(framePts: Micros, clock: Micros, stalled: Boolean): Fra
         else -> FrameDecision.Wait(minOf(-lateUs, MAX_WAIT_US))
     }
 }
+
+/**
+ * While blending, the frame after the last one released goes to the surface as soon as that last frame is due.
+ * The GL thread then holds both ends of the next blend before the screen needs them. Duplicate mode never prefetches.
+ */
+internal fun shouldPrefetchNext(blending: Boolean, lastReleased: Micros?, clock: Micros): Boolean =
+    blending && lastReleased != null && lastReleased <= clock

@@ -2,6 +2,7 @@ package com.example.smoothplayer.feature.player.playback
 
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
@@ -15,6 +16,8 @@ public data class PlayerUiState(
     val stats: PlaybackStats? = null,
     val statsVisible: Boolean = false,
     val loggingEnabled: Boolean = false,
+    val interpolation: InterpolationMode = InterpolationMode.Duplicate,
+    val fullscreen: Boolean = false,
 ) {
     public enum class Phase { Idle, Preparing, Ready, Playing, Paused, Ended, Failed }
 }
@@ -32,6 +35,12 @@ public sealed interface PlayerEvent {
     public data class StatsReceived(val stats: PlaybackStats) : PlayerEvent
     public data object StatsToggled : PlayerEvent
     public data object LoggingToggled : PlayerEvent
+
+    /** The user switched between duplicating and blending frames. The view model forwards the new mode to the engine. */
+    public data object InterpolationToggled : PlayerEvent
+
+    /** Enters or leaves full screen. The picture fills the window, and the host hides everything else. */
+    public data object FullscreenToggled : PlayerEvent
 }
 
 public sealed interface PlayerEffect {

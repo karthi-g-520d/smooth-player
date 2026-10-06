@@ -274,6 +274,8 @@ Effort assumes one developer who knows Kotlin but is new to GL and codecs. "d" m
 
 **Acceptance:** over 5 minutes, at least 99.5% of content frames are shown for exactly 2 vsyncs, with zero vsync misses on the flagship and at most 0.5% on mid-range. A/V drift stays within ±20 ms.
 
+**Result and accepted exception (2026-10-07):** the Step 4 build measured 98.9% average cadence on the H.264 1080p30 clip, with 1 drop in 4,341 frames and 0 ms A/V drift. Missed vsyncs were measured with Perfetto on the vivo V2334 and ranged from 0.6% to 2.2% across runs. The 0.5% bar was not met. Step 4 and Step 5 builds were measured under the same conditions and fall in the same range, so no regression from Step 5 was found. The user accepted this result for Step 4 and closed the investigation with the current build. The 99.5% cadence bar and the 0.5% vsync bar are re-checked in Step 8, on the flagship and mid-range devices.
+
 ### Step 5: Two frames resident plus simple blend interpolation (4–5 d)
 **Key focus:** the OES → RGBA copy, the ring buffer, and the first output that genuinely depends on t.
 - Copy pass: OES → `GL_RGBA8` slot (applying the transform matrix), plus a luma pass at 1/4 resolution (`dot(rgb, vec3(0.299,0.587,0.114))`, box-downsampled) into `GL_R16F` or `R8`. Build a 1/8 or 1/16 level as well for hierarchical ME.
@@ -281,6 +283,10 @@ Effort assumes one developer who knows Kotlin but is new to GL and codecs. "d" m
 - Flip between modes at runtime: duplicate / blend.
 
 **Acceptance:** blend runs under 1.5 ms at 1080p on mid-range. Shown side by side, blending looks smoother but ghosts on motion. That ghosting is why motion compensation (MC) is needed.
+
+**Status (2026-10-07):** the blend draw measured 0.17–0.20 ms at p50 and 0.8–1.0 ms at p95 at 1080p on the vivo V2334, which is the only device so far. Visual check (user, 2026-10-07, on the test clip): no visible difference between Blend and Duplicate. Ghosting on motion has not been checked on a fast-pan clip. Unit tests for the Step 5 engine and player code pass. The copy and luma passes add about 0.9 ms of GL work per decoded frame.
+
+**Step 5 closed (2026-10-07):** the user accepted the result. The blend mechanism is verified: frame pairs are chosen correctly, the phase changes on every refresh (grey debug view), and the two frames differ at moving edges (difference debug view). The blend's visual effect is too small to see on these test clips, because a 50% mix of frames 33 ms apart gives a faint double edge, and the clips already contain motion blur. Motion-compensated frames (Steps 6 and 7) are where the visible gain comes from.
 
 ### Step 6: Motion vector generation by block matching (12–15 d)
 **Key focus:** a smooth "true-motion" vector field, which matters far more than the lowest SAD (sum of absolute differences) per block. Decide early whether to run ME once per pair of source frames, at 30 Hz, and reuse its vectors for every t. Recommended: yes, which halves the ME cost at 30→60.

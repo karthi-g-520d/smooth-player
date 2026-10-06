@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.engine.impl.clock.MasterClock
@@ -33,9 +34,17 @@ private const val ATTR_POSITION = 0
 private const val ATTR_UV = 1
 private const val UNIFORM_ROTATION = 0
 private const val UNIFORM_TEX_MATRIX = 2
+// Fragment-stage uniforms share location 6 across programs. Each program has its own uniforms, so the luma pass
+// (u_texel, a vec2) and the blend pass (u_t, a float) can both use it.
+private const val UNIFORM_TEXEL = 6
+private const val UNIFORM_T = 6
+private const val UNIFORM_DEBUG_VIEW = 7
 private const val UV_OFFSET_BYTES = 2 * BYTES_PER_FLOAT
-private const val VERTEX_SHADER_ASSET = "shaders/oes_passthrough.vert"
-private const val FRAGMENT_SHADER_ASSET = "shaders/oes_passthrough.frag"
+private const val VERTEX_SHADER_ASSET = "shaders/quad.vert"
+private const val COPY_SHADER_ASSET = "shaders/oes_to_rgba.frag"
+private const val LUMA_QUARTER_SHADER_ASSET = "shaders/luma_quarter.frag"
+private const val LUMA_EIGHTH_SHADER_ASSET = "shaders/luma_eighth.frag"
+private const val BLEND_SHADER_ASSET = "shaders/blend.frag"
 private const val TEXTURE_MATRIX_SIZE = 16
 private const val ROTATION_MATRIX_SIZE = 4
 private const val QUAD_HALF_EXTENT = 1f
@@ -48,6 +57,25 @@ private const val TARGET_REFRESH_HZ = 60f
  */
 internal const val GPU_TIMERS_ENABLED = true
 
+/**
+ * Diagnostic switch for the luma passes. They run on every arriving frame, and nothing reads them until motion
+ * estimation exists. Turning them off isolates their cost on the GL thread.
+ */
+internal const val LUMA_PASSES_ENABLED = true
+
+/**
+ * Diagnostic switch for the present draw. When on, each vsync still clears and swaps the window, but skips the blend
+ * draw, so the picture is black. If misses drop with it on, the draw is the cause. If they stay, the cause is the
+ * swap waiting on the compositor.
+ */
+internal const val EMPTY_PRESENT_ENABLED = false
+
+/**
+ * Diagnostic view for the blend shader. 0 is the normal picture. 1 shows where the two blended frames differ, amplified,
+ * so motion is bright. 2 shows the blend phase as grey, so a changing grey proves the phase reaches the shader.
+ */
+internal const val BLEND_DEBUG_VIEW = 0
+
 // x, y, u, v per vertex, as a triangle strip covering clip space.
 private val QUAD = floatArrayOf(
     -QUAD_HALF_EXTENT, -QUAD_HALF_EXTENT, 0f, 0f,
@@ -56,9 +84,21 @@ private val QUAD = floatArrayOf(
     QUAD_HALF_EXTENT, QUAD_HALF_EXTENT, 1f, 1f,
 )
 
+private val IDENTITY_2 = floatArrayOf(1f, 0f, 0f, 1f)
+private val IDENTITY_4 = floatArrayOf(
+    1f, 0f, 0f, 0f,
+    0f, 1f, 0f, 0f,
+    0f, 0f, 1f, 0f,
+    0f, 0f, 0f, 1f,
+)
+
 /**
  * GL side of playback. Owns one EGL context on the FI-GL thread, an external (OES) texture wrapped in a
  * [SurfaceTexture] for the decoder to write into, and an optional window surface to draw into.
+ *
+ * Each arriving frame is copied out of the OES texture into a [FrameRing] slot, with its luma at 1/4 and 1/8.
+ * On every vsync the window is drawn from the ring: the newest frame in [InterpolationMode.Duplicate], or the two
+ * frames around the screen's content time in [InterpolationMode.Blend].
  *
  * Every GL call runs on the FI-GL thread. The public methods only post work to it, except
  * [awaitFrameSurface], which the decoder thread calls and which blocks that thread only.
@@ -67,6 +107,7 @@ private val QUAD = floatArrayOf(
 internal class VideoRenderer(
     private val assets: AssetManager,
     private val telemetry: FrameTelemetry,
+    initialMode: InterpolationMode,
 ) {
     private val glThread = HandlerThread(GL_THREAD_NAME).apply { start() }
     private val handler = Handler(glThread.looper)
@@ -80,6 +121,13 @@ internal class VideoRenderer(
     @Volatile private var contentWidth = 0
     @Volatile private var contentHeight = 0
     @Volatile private var contentRotation = 0
+    @Volatile private var mode = initialMode
+
+    /** Runs on the GL thread after each arriving frame is in the ring. The decoder releases the next frame from it. */
+    @Volatile var onFrameCopied: (() -> Unit)? = null
+
+    /** True while the blend mode is chosen. Read from the decoder thread, which releases frames one ahead when it is. */
+    val isBlending: Boolean get() = mode == InterpolationMode.Blend
 
     // GL-thread-only state.
     private var core: EglCore? = null
@@ -88,14 +136,16 @@ internal class VideoRenderer(
     private var windowHeight = 0
     private var surfaceTexture: SurfaceTexture? = null
     private var textureId = 0
-    private var program = 0
+    private var copyProgram = 0
+    private var lumaQuarterProgram = 0
+    private var lumaEighthProgram = 0
+    private var blendProgram = 0
     private var vertexArray = 0
     private var vertexBuffer = 0
-    private var hasFrame = false
+    private var ring: FrameRing? = null
     private var gpuTimers: GpuTimerRing? = null
     @Volatile private var pacer: VsyncPacer? = null
     private var paced = false
-    private var latestPtsNs = 0L
     private val texMatrix = FloatArray(TEXTURE_MATRIX_SIZE)
     private val rotationMatrix = FloatArray(ROTATION_MATRIX_SIZE)
     private val quadBuffer: FloatBuffer = ByteBuffer.allocateDirect(QUAD.size * BYTES_PER_FLOAT)
@@ -124,7 +174,12 @@ internal class VideoRenderer(
         contentRotation = info.rotationDegrees
     }
 
-    /** Draws into [surface]. Redraws the last frame straight away if one exists, so a rotation does not go black. */
+    /** Chooses how the next refreshes pick their frames. Takes effect at the next vsync. */
+    fun setInterpolationMode(newMode: InterpolationMode) {
+        mode = newMode
+    }
+
+    /** Draws into [surface]. Redraws the newest frame straight away if one exists, so a rotation does not go black. */
     fun attachWindow(surface: Surface, width: Int, height: Int) {
         handler.post {
             val eglCore = core ?: return@post
@@ -133,7 +188,7 @@ internal class VideoRenderer(
             windowSurface = eglCore.createWindowSurface(surface)
             windowWidth = width
             windowHeight = height
-            if (hasFrame) drawFrame()
+            presentLatest(presentNs = null)
         }
     }
 
@@ -175,18 +230,50 @@ internal class VideoRenderer(
     /** The content time that the next vsync will show, or null when not pacing. Read from the decoder thread. */
     fun releaseTargetUs(): Micros? = pacer?.releaseTargetUs
 
-    /** Draws the newest frame on this vsync, with presentation time set so the compositor shows it at [presentNs]. */
+    /** Draws the chosen frames on this vsync, with presentation time set so the compositor shows it at [presentNs]. */
     @GlThread
     private fun onVsync(presentNs: Long, periodNs: Long) {
-        if (!hasFrame || windowSurface == null) return
-        drawFrame(presentNs)
-        telemetry.onVsyncDraw(latestPtsNs / NANOS_PER_MICRO, periodNs, pacer?.displayContentUsOrNull(presentNs))
+        if (windowSurface == null) return
+        val contentUs = pacer?.displayContentUsOrNull(presentNs)
+        val pick = chooseFrames(contentUs) ?: return
+        present(presentNs, pick)
+        telemetry.onVsyncDraw(checkNotNull(ring).pts(pick.a), periodNs, contentUs)
+    }
+
+    /**
+     * The two frames to show at [contentUs]. In duplicate mode, or while the clock has no reference point, that is the
+     * newest frame. In blend mode it is the pair around the content time, falling back to the newest frame when no
+     * frame is at or before that time.
+     */
+    @GlThread
+    private fun chooseFrames(contentUs: Long?): BlendPick? {
+        val frames = ring ?: return null
+        if (isBlending && contentUs != null) {
+            pickBlendPair(frames.ptsArray(), contentUs, MAX_BLEND_GAP_US)?.let { return it }
+        }
+        return latestPick()
+    }
+
+    /** The newest frame, shown alone. Null before the first frame arrives. */
+    @GlThread
+    private fun latestPick(): BlendPick? {
+        val latest = ring?.latest ?: return null
+        if (latest < 0) return null
+        return BlendPick(latest, latest, 0f)
+    }
+
+    /** Draws the newest frame without pacing, for example when the picture must follow a seek while paused. */
+    @GlThread
+    private fun presentLatest(presentNs: Long?) {
+        val pick = latestPick() ?: return
+        present(presentNs, pick)
     }
 
     /** Asks the compositor for the target refresh rate. Only the device's own choice of rate decides what is shown. */
     @GlThread
     private fun requestRefreshRate(surface: Surface) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        // The three-argument setFrameRate is API 31. The two-argument form from API 30 is not used here.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
         surface.setFrameRate(
             TARGET_REFRESH_HZ,
             Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
@@ -223,7 +310,11 @@ internal class VideoRenderer(
             texture.setOnFrameAvailableListener(SurfaceTexture.OnFrameAvailableListener { onFrameAvailable() }, handler)
             surfaceTexture = texture
             frameSurface = Surface(texture)
-            program = linkProgram(loadAsset(VERTEX_SHADER_ASSET), loadAsset(FRAGMENT_SHADER_ASSET))
+            val vertexSource = loadAsset(VERTEX_SHADER_ASSET)
+            copyProgram = linkProgram(vertexSource, loadAsset(COPY_SHADER_ASSET))
+            lumaQuarterProgram = linkProgram(vertexSource, loadAsset(LUMA_QUARTER_SHADER_ASSET))
+            lumaEighthProgram = linkProgram(vertexSource, loadAsset(LUMA_EIGHTH_SHADER_ASSET))
+            blendProgram = linkProgram(vertexSource, loadAsset(BLEND_SHADER_ASSET))
             createVertexState()
             gpuTimers = if (GPU_TIMERS_ENABLED) GpuTimerRing.createIfSupported() else null
             pacer = VsyncPacer(handler) { presentNs, periodNs -> onVsync(presentNs, periodNs) }
@@ -276,17 +367,72 @@ internal class VideoRenderer(
         core?.makeCurrent()
         trace(TraceNames.GL_UPDATE) { texture.updateTexImage() }
         texture.getTransformMatrix(texMatrix)
-        latestPtsNs = texture.timestamp
-        hasFrame = true
+        try {
+            copyToRing(texture.timestamp / NANOS_PER_MICRO)
+        } finally {
+            // Always signalled, so the decoder is never left waiting for a copy that did not happen.
+            onFrameCopied?.invoke()
+        }
         // While pacing, the vsync callback draws. Otherwise draw now, as when paused.
-        if (!paced) drawFrame()
+        if (!paced) presentLatest(presentNs = null)
     }
 
+    /**
+     * Copies the frame now in the OES texture into the next ring slot, then derives its luma at 1/4 and 1/8.
+     * Runs once per arriving frame, never per vsync, so the cost does not grow with the refresh rate.
+     */
     @GlThread
-    private fun drawFrame(presentNs: Long? = null) {
+    private fun copyToRing(ptsUs: Long) {
+        val width = contentWidth
+        val height = contentHeight
+        if (width <= 0 || height <= 0) return
+        val frames = ringFor(width, height)
+        val slot = frames.acquire(ptsUs)
+
+        trace(TraceNames.GL_COPY) {
+            frames.attach(frames.frameTexture(slot), width, height)
+            GLES30.glUseProgram(copyProgram)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+            GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+            drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = texMatrix)
+        }
+
+        if (LUMA_PASSES_ENABLED) trace(TraceNames.GL_LUMA) {
+            frames.attach(frames.lumaQuarterTexture(slot), frames.quarterWidth, frames.quarterHeight)
+            GLES30.glUseProgram(lumaQuarterProgram)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(slot))
+            GLES30.glUniform2f(UNIFORM_TEXEL, 1f / width, 1f / height)
+            drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = IDENTITY_4)
+
+            frames.attach(frames.lumaEighthTexture(slot), frames.eighthWidth, frames.eighthHeight)
+            GLES30.glUseProgram(lumaEighthProgram)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.lumaQuarterTexture(slot))
+            drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = IDENTITY_4)
+        }
+    }
+
+    /** The ring for this content size. Replaced when the size changes, for example when a new file is opened. */
+    @GlThread
+    private fun ringFor(width: Int, height: Int): FrameRing {
+        val current = ring
+        if (current != null && current.width == width && current.height == height) return current
+        current?.close()
+        return FrameRing(width, height).also { ring = it }
+    }
+
+    /**
+     * Draws the chosen frames to the window. Viewport, clear and framebuffer are set here, so no state from a copy
+     * pass leaks into the window draw.
+     */
+    @GlThread
+    private fun present(presentNs: Long?, pick: BlendPick) {
         val eglCore = core ?: return
         val target = windowSurface ?: return
+        val frames = ring ?: return
         eglCore.makeCurrent(target)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
 
         val rotation = contentRotation
         val quarterTurn = Math.floorMod(rotation, 180) != 0
@@ -298,11 +444,11 @@ internal class VideoRenderer(
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
         val timers = gpuTimers
-        trace(TraceNames.GL_DRAW) {
+        if (!EMPTY_PRESENT_ENABLED) trace(TraceNames.GL_DRAW) {
             if (timers != null) {
-                timers.time({ drawQuad(rotation) }, telemetry::onPresentGpu)
+                timers.time({ drawBlend(frames, pick, rotation) }, telemetry::onPresentGpu)
             } else {
-                drawQuad(rotation)
+                drawBlend(frames, pick, rotation)
             }
         }
 
@@ -310,13 +456,26 @@ internal class VideoRenderer(
     }
 
     @GlThread
-    private fun drawQuad(rotation: Int) {
-        GLES30.glUseProgram(program)
-        GLES30.glBindVertexArray(vertexArray)
+    private fun drawBlend(frames: FrameRing, pick: BlendPick, rotation: Int) {
+        GLES30.glUseProgram(blendProgram)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-        GLES30.glUniformMatrix2fv(UNIFORM_ROTATION, 1, false, clockwiseRotation(rotation, rotationMatrix), 0)
-        GLES30.glUniformMatrix4fv(UNIFORM_TEX_MATRIX, 1, false, texMatrix, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.a))
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.b))
+        GLES30.glUniform1f(UNIFORM_T, pick.t)
+        GLES30.glUniform1i(UNIFORM_DEBUG_VIEW, BLEND_DEBUG_VIEW)
+        drawFullScreenQuad(rotation = clockwiseRotation(rotation, rotationMatrix), uvMatrix = IDENTITY_4)
+    }
+
+    /**
+     * One full-screen quad with the given transforms. Every pass calls this, so each one sets the vertex state and
+     * both uniforms it needs. Nothing is inherited from the pass before.
+     */
+    @GlThread
+    private fun drawFullScreenQuad(rotation: FloatArray, uvMatrix: FloatArray) {
+        GLES30.glBindVertexArray(vertexArray)
+        GLES30.glUniformMatrix2fv(UNIFORM_ROTATION, 1, false, rotation, 0)
+        GLES30.glUniformMatrix4fv(UNIFORM_TEX_MATRIX, 1, false, uvMatrix, 0)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, VERTEX_COUNT)
     }
 
@@ -338,7 +497,13 @@ internal class VideoRenderer(
         frameSurface = null
         surfaceTexture = null
         val eglCore = core ?: return
-        GLES30.glDeleteProgram(program)
+        eglCore.makeCurrent()
+        ring?.close()
+        ring = null
+        GLES30.glDeleteProgram(copyProgram)
+        GLES30.glDeleteProgram(lumaQuarterProgram)
+        GLES30.glDeleteProgram(lumaEighthProgram)
+        GLES30.glDeleteProgram(blendProgram)
         GLES30.glDeleteBuffers(1, intArrayOf(vertexBuffer), 0)
         GLES30.glDeleteVertexArrays(1, intArrayOf(vertexArray), 0)
         GLES30.glDeleteTextures(1, intArrayOf(textureId), 0)

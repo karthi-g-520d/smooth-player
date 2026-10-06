@@ -1,6 +1,7 @@
 package com.example.smoothplayer.feature.player.playback
 
 import com.example.smoothplayer.engine.api.model.EngineState
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 
 /** Pure state transitions for the player screen. No Android imports, so it runs in JVM tests. */
 internal object PlayerReducer {
@@ -14,6 +15,13 @@ internal object PlayerReducer {
         is PlayerEvent.StatsReceived -> state.copy(stats = event.stats)
         PlayerEvent.StatsToggled -> state.copy(statsVisible = !state.statsVisible)
         PlayerEvent.LoggingToggled -> state.copy(loggingEnabled = !state.loggingEnabled)
+        PlayerEvent.InterpolationToggled -> state.copy(interpolation = state.interpolation.other())
+        PlayerEvent.FullscreenToggled -> state.copy(fullscreen = !state.fullscreen)
+    }
+
+    private fun InterpolationMode.other(): InterpolationMode = when (this) {
+        InterpolationMode.Duplicate -> InterpolationMode.Blend
+        InterpolationMode.Blend -> InterpolationMode.Duplicate
     }
 
     private fun PlayerUiState.fromEngine(engineState: EngineState): PlayerUiState = when (engineState) {

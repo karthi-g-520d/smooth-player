@@ -8,6 +8,8 @@ internal object TraceNames {
     const val AUDIO_WRITE = "FI:audio:write"
     const val GL_DRAW = "FI:gl:draw"
     const val GL_UPDATE = "FI:gl:update"
+    const val GL_COPY = "FI:gl:copy"
+    const val GL_LUMA = "FI:gl:luma"
     const val GL_SWAP = "FI:gl:swap"
 }
 
