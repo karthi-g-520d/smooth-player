@@ -1,0 +1,99 @@
+#version 310 es
+// Coarse block matching at 1/8 resolution: the GPU form of coarseField in MotionSearch.kt, which defines the result.
+// Change the two together. The defines come from GpuMotionSearch.kt.
+//
+// One work group per block, all blocks in one dispatch. A coarse block is half the fine block on a side, so the
+// coarse field lies on the same grid as the fine one. The candidates are the vectors within ±COARSE_RANGE. Each
+// invocation sums block rows of candidate SADs, so every invocation has work. Each candidate then costs its SAD plus
+// COARSE_WEIGHT per pixel of distance from zero. An atomicMin on (cost, candidate index) keeps the cheapest, with
+// ties going to the first candidate in raster order, as on the CPU.
+//
+// IN : u_prevLuma, u_nextLuma (R8 luma at 1/8), u_planeSize (1/8 size in pixels), u_grid (block columns and rows)
+// OUT: b_coarse[block] = integer vector at 1/8 resolution
+precision highp float;
+precision highp int;
+
+layout(local_size_x = SEARCH_WORKGROUP_SIZE) in;
+
+#define COARSE_BLOCK (BLOCK_SIZE / 2)
+#define TILE_SIDE (COARSE_BLOCK + 2 * COARSE_RANGE)
+#define CANDIDATE_SIDE (2 * COARSE_RANGE + 1)
+#define CANDIDATE_COUNT (CANDIDATE_SIDE * CANDIDATE_SIDE)
+#define BLOCK_PIXELS (COARSE_BLOCK * COARSE_BLOCK)
+
+layout(binding = BINDING_PREV_LUMA) uniform highp sampler2D u_prevLuma;
+layout(binding = BINDING_NEXT_LUMA) uniform highp sampler2D u_nextLuma;
+layout(std430, binding = BINDING_COARSE_FIELD) writeonly buffer CoarseField { ivec2 b_coarse[]; };
+layout(location = LOC_PLANE_SIZE) uniform ivec2 u_planeSize;
+layout(location = LOC_GRID) uniform ivec2 u_grid;
+
+shared int s_prev[TILE_SIDE * TILE_SIDE];
+shared int s_next[BLOCK_PIXELS];
+shared uint s_best;
+// Each candidate's SAD, summed one block row per invocation so every invocation has work.
+shared int s_sad[CANDIDATE_COUNT];
+
+const float MAX_LUMA = 255.0;
+
+// Reads clamp to the nearest edge pixel, like LumaPlane.at.
+int prevAt(ivec2 p) {
+    return int(round(texelFetch(u_prevLuma, clamp(p, ivec2(0), u_planeSize - 1), 0).r * MAX_LUMA));
+}
+
+int nextAt(ivec2 p) {
+    return int(round(texelFetch(u_nextLuma, clamp(p, ivec2(0), u_planeSize - 1), 0).r * MAX_LUMA));
+}
+
+// SAD of one row of the block against the previous frame displaced by v.
+int rowSad(ivec2 v, ivec2 valid, int py) {
+    int sum = 0;
+    for (int px = 0; px < valid.x; px++) {
+        int prev = s_prev[(py - v.y + COARSE_RANGE) * TILE_SIDE + (px - v.x + COARSE_RANGE)];
+        sum += abs(s_next[py * COARSE_BLOCK + px] - prev);
+    }
+    return sum;
+}
+
+void main() {
+    ivec2 block = ivec2(gl_WorkGroupID.xy);
+    ivec2 origin = block * COARSE_BLOCK;
+    ivec2 valid = min(ivec2(COARSE_BLOCK), u_planeSize - origin);
+    int lane = int(gl_LocalInvocationIndex);
+
+    if (lane == 0) s_best = 0xFFFFFFFFu;
+    for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) s_sad[c] = 0;
+    ivec2 tileOrigin = origin - COARSE_RANGE;
+    for (int i = lane; i < TILE_SIDE * TILE_SIDE; i += SEARCH_WORKGROUP_SIZE) {
+        s_prev[i] = prevAt(tileOrigin + ivec2(i % TILE_SIDE, i / TILE_SIDE));
+    }
+    for (int i = lane; i < BLOCK_PIXELS; i += SEARCH_WORKGROUP_SIZE) {
+        s_next[i] = nextAt(origin + ivec2(i % COARSE_BLOCK, i / COARSE_BLOCK));
+    }
+    memoryBarrierShared();
+    barrier();
+
+    for (int job = lane; job < CANDIDATE_COUNT * COARSE_BLOCK; job += SEARCH_WORKGROUP_SIZE) {
+        int c = job / COARSE_BLOCK;
+        int py = job % COARSE_BLOCK;
+        if (py < valid.y) {
+            atomicAdd(s_sad[c], rowSad(ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - COARSE_RANGE, valid, py));
+        }
+    }
+    memoryBarrierShared();
+    barrier();
+
+    for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) {
+        ivec2 v = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - COARSE_RANGE;
+        int penalty = COARSE_WEIGHT * (abs(v.x) + abs(v.y));
+        uint cost = uint(s_sad[c] + penalty);
+        atomicMin(s_best, (cost << CANDIDATE_BITS) | uint(c));
+    }
+    memoryBarrierShared();
+    barrier();
+
+    if (lane == 0) {
+        int candidate = int(s_best & ((1u << CANDIDATE_BITS) - 1u));
+        b_coarse[block.y * u_grid.x + block.x] =
+            ivec2(candidate % CANDIDATE_SIDE, candidate / CANDIDATE_SIDE) - COARSE_RANGE;
+    }
+}

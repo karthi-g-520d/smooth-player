@@ -1,0 +1,205 @@
+#version 310 es
+// Refinement at 1/4 resolution: the GPU form of the fine level of estimateMotion in MotionSearch.kt, which defines
+// the result. Change the two together. The defines (block size, ranges, bindings, locations) come from
+// GpuMotionSearch.kt.
+//
+// One work group per block, all blocks in one dispatch: the predictor comes from the coarse pass, not from
+// neighbouring blocks at this level. The predictor is the median of the 3x3 coarse neighbourhood, doubled. The
+// previous frame's search area and the next frame's block are loaded into shared memory once. The candidates are the
+// offsets within ±REFINE_RANGE of the predictor. Each invocation sums block rows of candidate SADs, so every
+// invocation has work. An atomicMin on (cost, candidate index) then keeps the cheapest, with ties going to the first
+// candidate in raster order, as on the CPU.
+//
+// IN : u_prevLuma, u_nextLuma (R8 luma at 1/4), u_planeSize (1/4 size in pixels), u_grid (block columns and rows),
+//      b_coarse (the coarse pass's vectors)
+// OUT: b_raw[block] = integer vector, subpixel offset and residual, before the median filter
+precision highp float;
+precision highp int;
+
+layout(local_size_x = SEARCH_WORKGROUP_SIZE) in;
+
+// The predictor reaches ±2 * COARSE_RANGE, the offset ±REFINE_RANGE, and the subpixel fit one pixel more.
+#define TILE_MARGIN (2 * COARSE_RANGE + REFINE_RANGE + 1)
+#define TILE_SIDE (BLOCK_SIZE + 2 * TILE_MARGIN)
+#define CANDIDATE_SIDE (2 * REFINE_RANGE + 1)
+#define CANDIDATE_COUNT (CANDIDATE_SIDE * CANDIDATE_SIDE)
+#define BLOCK_PIXELS (BLOCK_SIZE * BLOCK_SIZE)
+#define FIT_SAMPLES 5
+#define NEIGHBOURHOOD 9
+
+struct Block {
+    ivec2 vector;
+    vec2 subpixel;
+    float residual;
+    float pad;
+};
+
+layout(binding = BINDING_PREV_LUMA) uniform highp sampler2D u_prevLuma;
+layout(binding = BINDING_NEXT_LUMA) uniform highp sampler2D u_nextLuma;
+layout(std430, binding = BINDING_COARSE_FIELD) readonly buffer CoarseField { ivec2 b_coarse[]; };
+layout(std430, binding = BINDING_RAW_FIELD) writeonly buffer RawField { Block b_raw[]; };
+layout(location = LOC_PLANE_SIZE) uniform ivec2 u_planeSize;
+layout(location = LOC_GRID) uniform ivec2 u_grid;
+
+// The previous frame around the block, wide enough for every candidate and the subpixel fit around it.
+shared int s_prev[TILE_SIDE * TILE_SIDE];
+shared int s_next[BLOCK_PIXELS];
+shared uint s_best;
+// Each candidate's SAD, summed one block row per invocation so every invocation has work.
+shared int s_sad[CANDIDATE_COUNT];
+shared ivec2 s_predictor;
+shared int s_fitSad[FIT_SAMPLES];
+
+// The best vector itself, then its left, right, upper and lower neighbours, for the parabola fit.
+const ivec2 FIT_OFFSETS[FIT_SAMPLES] = ivec2[FIT_SAMPLES](
+    ivec2(0, 0), ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+const float HALF_PIXEL = 0.5;
+const float MAX_LUMA = 255.0;
+
+// Reads clamp to the nearest edge pixel, like LumaPlane.at.
+int prevAt(ivec2 p) {
+    return int(round(texelFetch(u_prevLuma, clamp(p, ivec2(0), u_planeSize - 1), 0).r * MAX_LUMA));
+}
+
+int nextAt(ivec2 p) {
+    return int(round(texelFetch(u_nextLuma, clamp(p, ivec2(0), u_planeSize - 1), 0).r * MAX_LUMA));
+}
+
+int medianOf(int values[NEIGHBOURHOOD]) {
+    for (int i = 1; i < NEIGHBOURHOOD; i++) {
+        int value = values[i];
+        int j = i - 1;
+        while (j >= 0 && values[j] > value) {
+            values[j + 1] = values[j];
+            j--;
+        }
+        values[j + 1] = value;
+    }
+    return values[NEIGHBOURHOOD / 2];
+}
+
+// Median of the 3x3 coarse neighbourhood, per component, doubled to 1/4 resolution. Edges repeat the nearest block.
+ivec2 predictor(ivec2 block) {
+    int xs[NEIGHBOURHOOD];
+    int ys[NEIGHBOURHOOD];
+    int n = 0;
+    for (int oy = -1; oy <= 1; oy++) {
+        for (int ox = -1; ox <= 1; ox++) {
+            ivec2 source = clamp(block + ivec2(ox, oy), ivec2(0), u_grid - 1);
+            ivec2 v = b_coarse[source.y * u_grid.x + source.x];
+            xs[n] = v.x;
+            ys[n] = v.y;
+            n++;
+        }
+    }
+    return 2 * ivec2(medianOf(xs), medianOf(ys));
+}
+
+// SAD of one row of the block against the previous frame displaced by v: next(p) against prev(p - v).
+int rowSad(ivec2 v, ivec2 valid, int py) {
+    int sum = 0;
+    for (int px = 0; px < valid.x; px++) {
+        int prev = s_prev[(py - v.y + TILE_MARGIN) * TILE_SIDE + (px - v.x + TILE_MARGIN)];
+        sum += abs(s_next[py * BLOCK_SIZE + px] - prev);
+    }
+    return sum;
+}
+
+// SAD of the block's in-plane pixels against the previous frame displaced by v.
+int candidateSad(ivec2 v, ivec2 valid) {
+    int sum = 0;
+    for (int py = 0; py < valid.y; py++) {
+        sum += rowSad(v, valid, py);
+    }
+    return sum;
+}
+
+// Sum of absolute deviations from the block mean, in the CPU's order so the float sums agree.
+float blockDetail(ivec2 valid) {
+    int total = 0;
+    for (int py = 0; py < valid.y; py++) {
+        for (int px = 0; px < valid.x; px++) {
+            total += s_next[py * BLOCK_SIZE + px];
+        }
+    }
+    float mean = float(total) / float(valid.x * valid.y);
+    float detail = 0.0;
+    for (int py = 0; py < valid.y; py++) {
+        for (int px = 0; px < valid.x; px++) {
+            detail += abs(float(s_next[py * BLOCK_SIZE + px]) - mean);
+        }
+    }
+    return detail;
+}
+
+// Same rules as subpixelOffset in MotionSearch.kt: zero for an exact match or when the samples are not a minimum.
+float subpixelOffset(int before, int centre, int after) {
+    if (centre == 0) return 0.0;
+    int curvature = before - 2 * centre + after;
+    if (curvature <= 0) return 0.0;
+    return clamp(HALF_PIXEL * float(before - after) / float(curvature), -HALF_PIXEL, HALF_PIXEL);
+}
+
+void main() {
+    ivec2 block = ivec2(gl_WorkGroupID.xy);
+    ivec2 origin = block * BLOCK_SIZE;
+    // Blocks on the right and bottom edges can hang off the plane. Only their in-plane pixels count.
+    ivec2 valid = min(ivec2(BLOCK_SIZE), u_planeSize - origin);
+    int lane = int(gl_LocalInvocationIndex);
+
+    if (lane == 0) {
+        s_best = 0xFFFFFFFFu;
+        s_predictor = predictor(block);
+    }
+    for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) s_sad[c] = 0;
+    ivec2 tileOrigin = origin - TILE_MARGIN;
+    for (int i = lane; i < TILE_SIDE * TILE_SIDE; i += SEARCH_WORKGROUP_SIZE) {
+        s_prev[i] = prevAt(tileOrigin + ivec2(i % TILE_SIDE, i / TILE_SIDE));
+    }
+    for (int i = lane; i < BLOCK_PIXELS; i += SEARCH_WORKGROUP_SIZE) {
+        s_next[i] = nextAt(origin + ivec2(i % BLOCK_SIZE, i / BLOCK_SIZE));
+    }
+    memoryBarrierShared();
+    barrier();
+
+    ivec2 pred = s_predictor;
+    for (int job = lane; job < CANDIDATE_COUNT * BLOCK_SIZE; job += SEARCH_WORKGROUP_SIZE) {
+        int c = job / BLOCK_SIZE;
+        int py = job % BLOCK_SIZE;
+        if (py < valid.y) {
+            ivec2 offset = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - REFINE_RANGE;
+            atomicAdd(s_sad[c], rowSad(pred + offset, valid, py));
+        }
+    }
+    memoryBarrierShared();
+    barrier();
+
+    for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) {
+        ivec2 offset = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - REFINE_RANGE;
+        int penalty = SMOOTHNESS_WEIGHT * (abs(offset.x) + abs(offset.y));
+        uint cost = uint(s_sad[c] + penalty);
+        atomicMin(s_best, (cost << CANDIDATE_BITS) | uint(c));
+    }
+    memoryBarrierShared();
+    barrier();
+
+    int candidate = int(s_best & ((1u << CANDIDATE_BITS) - 1u));
+    ivec2 best = pred + ivec2(candidate % CANDIDATE_SIDE, candidate / CANDIDATE_SIDE) - REFINE_RANGE;
+    if (lane < FIT_SAMPLES) {
+        s_fitSad[lane] = candidateSad(best + FIT_OFFSETS[lane], valid);
+    }
+    memoryBarrierShared();
+    barrier();
+
+    if (lane == 0) {
+        int centre = s_fitSad[0];
+        Block result;
+        result.vector = best;
+        result.subpixel = vec2(
+            subpixelOffset(s_fitSad[1], centre, s_fitSad[2]),
+            subpixelOffset(s_fitSad[3], centre, s_fitSad[4]));
+        result.residual = float(centre) / (blockDetail(valid) + 1.0);
+        result.pad = 0.0;
+        b_raw[block.y * u_grid.x + block.x] = result;
+    }
+}

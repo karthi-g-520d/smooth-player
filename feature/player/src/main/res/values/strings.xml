@@ -43,7 +43,7 @@
     <string name="player_stats_percent">%1$.0f%%</string>
     <string name="player_stats_percent_precise">%1$.1f%%</string>
     <string name="player_stats_cadence">%1$s · avg %2$s</string>
-    <string name="player_stats">display %1$.1f fps · content %2$.1f fps\nrendered %3$d · dropped %4$d · A/V drift %5$s\nGPU present p50 %6$s · p95 %7$s\nrefresh %8$.0f Hz · thermal %9$s · cadence %10$s</string>
+    <string name="player_stats">display %1$.1f fps · content %2$.1f fps\nrendered %3$d · dropped %4$d · A/V drift %5$s\nGPU present p50 %6$s · p95 %7$s\nGPU motion p50 %8$s · p95 %9$s\nrefresh %10$.0f Hz · thermal %11$s · cadence %12$s</string>
     <string name="player_mode_duplicate">Mode: duplicate frames</string>
     <string name="player_mode_blend">Mode: blend frames</string>
     <string name="player_fullscreen_enter">Fullscreen</string>

@@ -10,7 +10,7 @@ private const val LUMA_EIGHTH_FROM_QUARTER = 2
 
 /**
  * A short ring of decoded frames, held as RGBA8 textures next to their luma at 1/4 and 1/8 resolution. The copy pass
- * writes a slot each time a frame arrives, and the blend pass reads two slots. Motion estimation will read the luma.
+ * writes a slot each time a frame arrives, and the blend pass reads two slots. Motion estimation reads the 1/4 luma.
  *
  * Each slot keeps its presentation time in microseconds, so the blend can pick the frame either side of a content time.
  * Every slot is the content's visible size before rotation. The display pass applies rotation and letterboxing.
@@ -57,6 +57,9 @@ internal class FrameRing(val width: Int, val height: Int) : AutoCloseable {
     fun pts(slot: Int): Long = ptsUs[slot]
 
     fun frameTexture(slot: Int): Int = frames[slot]
+
+    /** The slot written just before [slot]. Its PTS is [EMPTY_SLOT_PTS_US] until that many frames have arrived. */
+    fun previous(slot: Int): Int = (slot - 1 + SLOT_COUNT) % SLOT_COUNT
 
     fun lumaQuarterTexture(slot: Int): Int = lumaQuarter[slot]
 

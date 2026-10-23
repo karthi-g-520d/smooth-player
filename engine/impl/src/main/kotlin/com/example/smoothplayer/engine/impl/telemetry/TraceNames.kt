@@ -11,6 +11,7 @@ internal object TraceNames {
     const val GL_COPY = "FI:gl:copy"
     const val GL_LUMA = "FI:gl:luma"
     const val GL_SWAP = "FI:gl:swap"
+    const val INTERP_ME = "FI:interp:me"
 }
 
 /** Runs [block] inside a trace section. The section is always closed, even when [block] throws. */
