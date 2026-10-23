@@ -3,9 +3,10 @@
 // Change the two together. The defines come from GpuMotionSearch.kt.
 //
 // One work group per block, all blocks in one dispatch. A coarse block is half the fine block on a side, so the
-// coarse field lies on the same grid as the fine one. Each invocation scores a share of the candidates within
-// ±COARSE_RANGE, with COARSE_WEIGHT added per pixel of distance from zero. An atomicMin on (cost, candidate index)
-// keeps the cheapest, with ties going to the first candidate in raster order, as on the CPU.
+// coarse field lies on the same grid as the fine one. The candidates are the vectors within ±COARSE_RANGE. Each
+// invocation sums block rows of candidate SADs, so every invocation has work. Each candidate then costs its SAD plus
+// COARSE_WEIGHT per pixel of distance from zero. An atomicMin on (cost, candidate index) keeps the cheapest, with
+// ties going to the first candidate in raster order, as on the CPU.
 //
 // IN : u_prevLuma, u_nextLuma (R8 luma at 1/8), u_planeSize (1/8 size in pixels), u_grid (block columns and rows)
 // OUT: b_coarse[block] = integer vector at 1/8 resolution
@@ -29,6 +30,8 @@ layout(location = LOC_GRID) uniform ivec2 u_grid;
 shared int s_prev[TILE_SIDE * TILE_SIDE];
 shared int s_next[BLOCK_PIXELS];
 shared uint s_best;
+// Each candidate's SAD, summed one block row per invocation so every invocation has work.
+shared int s_sad[CANDIDATE_COUNT];
 
 const float MAX_LUMA = 255.0;
 
@@ -41,13 +44,12 @@ int nextAt(ivec2 p) {
     return int(round(texelFetch(u_nextLuma, clamp(p, ivec2(0), u_planeSize - 1), 0).r * MAX_LUMA));
 }
 
-int candidateSad(ivec2 v, ivec2 valid) {
+// SAD of one row of the block against the previous frame displaced by v.
+int rowSad(ivec2 v, ivec2 valid, int py) {
     int sum = 0;
-    for (int py = 0; py < valid.y; py++) {
-        for (int px = 0; px < valid.x; px++) {
-            int prev = s_prev[(py - v.y + COARSE_RANGE) * TILE_SIDE + (px - v.x + COARSE_RANGE)];
-            sum += abs(s_next[py * COARSE_BLOCK + px] - prev);
-        }
+    for (int px = 0; px < valid.x; px++) {
+        int prev = s_prev[(py - v.y + COARSE_RANGE) * TILE_SIDE + (px - v.x + COARSE_RANGE)];
+        sum += abs(s_next[py * COARSE_BLOCK + px] - prev);
     }
     return sum;
 }
@@ -59,6 +61,7 @@ void main() {
     int lane = int(gl_LocalInvocationIndex);
 
     if (lane == 0) s_best = 0xFFFFFFFFu;
+    for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) s_sad[c] = 0;
     ivec2 tileOrigin = origin - COARSE_RANGE;
     for (int i = lane; i < TILE_SIDE * TILE_SIDE; i += SEARCH_WORKGROUP_SIZE) {
         s_prev[i] = prevAt(tileOrigin + ivec2(i % TILE_SIDE, i / TILE_SIDE));
@@ -69,10 +72,20 @@ void main() {
     memoryBarrierShared();
     barrier();
 
+    for (int job = lane; job < CANDIDATE_COUNT * COARSE_BLOCK; job += SEARCH_WORKGROUP_SIZE) {
+        int c = job / COARSE_BLOCK;
+        int py = job % COARSE_BLOCK;
+        if (py < valid.y) {
+            atomicAdd(s_sad[c], rowSad(ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - COARSE_RANGE, valid, py));
+        }
+    }
+    memoryBarrierShared();
+    barrier();
+
     for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) {
         ivec2 v = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - COARSE_RANGE;
         int penalty = COARSE_WEIGHT * (abs(v.x) + abs(v.y));
-        uint cost = uint(candidateSad(v, valid) + penalty);
+        uint cost = uint(s_sad[c] + penalty);
         atomicMin(s_best, (cost << CANDIDATE_BITS) | uint(c));
     }
     memoryBarrierShared();

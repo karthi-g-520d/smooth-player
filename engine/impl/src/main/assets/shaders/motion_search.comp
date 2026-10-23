@@ -5,9 +5,10 @@
 //
 // One work group per block, all blocks in one dispatch: the predictor comes from the coarse pass, not from
 // neighbouring blocks at this level. The predictor is the median of the 3x3 coarse neighbourhood, doubled. The
-// previous frame's search area and the next frame's block are loaded into shared memory once. Each invocation then
-// scores a share of the offsets within ±REFINE_RANGE of the predictor, and an atomicMin on (cost, candidate index)
-// keeps the cheapest, with ties going to the first candidate in raster order, as on the CPU.
+// previous frame's search area and the next frame's block are loaded into shared memory once. The candidates are the
+// offsets within ±REFINE_RANGE of the predictor. Each invocation sums block rows of candidate SADs, so every
+// invocation has work. An atomicMin on (cost, candidate index) then keeps the cheapest, with ties going to the first
+// candidate in raster order, as on the CPU.
 //
 // IN : u_prevLuma, u_nextLuma (R8 luma at 1/4), u_planeSize (1/4 size in pixels), u_grid (block columns and rows),
 //      b_coarse (the coarse pass's vectors)
@@ -44,6 +45,8 @@ layout(location = LOC_GRID) uniform ivec2 u_grid;
 shared int s_prev[TILE_SIDE * TILE_SIDE];
 shared int s_next[BLOCK_PIXELS];
 shared uint s_best;
+// Each candidate's SAD, summed one block row per invocation so every invocation has work.
+shared int s_sad[CANDIDATE_COUNT];
 shared ivec2 s_predictor;
 shared int s_fitSad[FIT_SAMPLES];
 
@@ -92,14 +95,21 @@ ivec2 predictor(ivec2 block) {
     return 2 * ivec2(medianOf(xs), medianOf(ys));
 }
 
-// SAD of the block's in-plane pixels against the previous frame displaced by v: next(p) against prev(p - v).
+// SAD of one row of the block against the previous frame displaced by v: next(p) against prev(p - v).
+int rowSad(ivec2 v, ivec2 valid, int py) {
+    int sum = 0;
+    for (int px = 0; px < valid.x; px++) {
+        int prev = s_prev[(py - v.y + TILE_MARGIN) * TILE_SIDE + (px - v.x + TILE_MARGIN)];
+        sum += abs(s_next[py * BLOCK_SIZE + px] - prev);
+    }
+    return sum;
+}
+
+// SAD of the block's in-plane pixels against the previous frame displaced by v.
 int candidateSad(ivec2 v, ivec2 valid) {
     int sum = 0;
     for (int py = 0; py < valid.y; py++) {
-        for (int px = 0; px < valid.x; px++) {
-            int prev = s_prev[(py - v.y + TILE_MARGIN) * TILE_SIDE + (px - v.x + TILE_MARGIN)];
-            sum += abs(s_next[py * BLOCK_SIZE + px] - prev);
-        }
+        sum += rowSad(v, valid, py);
     }
     return sum;
 }
@@ -141,6 +151,7 @@ void main() {
         s_best = 0xFFFFFFFFu;
         s_predictor = predictor(block);
     }
+    for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) s_sad[c] = 0;
     ivec2 tileOrigin = origin - TILE_MARGIN;
     for (int i = lane; i < TILE_SIDE * TILE_SIDE; i += SEARCH_WORKGROUP_SIZE) {
         s_prev[i] = prevAt(tileOrigin + ivec2(i % TILE_SIDE, i / TILE_SIDE));
@@ -152,10 +163,21 @@ void main() {
     barrier();
 
     ivec2 pred = s_predictor;
+    for (int job = lane; job < CANDIDATE_COUNT * BLOCK_SIZE; job += SEARCH_WORKGROUP_SIZE) {
+        int c = job / BLOCK_SIZE;
+        int py = job % BLOCK_SIZE;
+        if (py < valid.y) {
+            ivec2 offset = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - REFINE_RANGE;
+            atomicAdd(s_sad[c], rowSad(pred + offset, valid, py));
+        }
+    }
+    memoryBarrierShared();
+    barrier();
+
     for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) {
         ivec2 offset = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - REFINE_RANGE;
         int penalty = SMOOTHNESS_WEIGHT * (abs(offset.x) + abs(offset.y));
-        uint cost = uint(candidateSad(pred + offset, valid) + penalty);
+        uint cost = uint(s_sad[c] + penalty);
         atomicMin(s_best, (cost << CANDIDATE_BITS) | uint(c));
     }
     memoryBarrierShared();
