@@ -23,11 +23,12 @@ private const val NANOS_PER_MILLI = 1_000_000.0
 private const val P50 = 0.50
 private const val P95 = 0.95
 
-// Quarter-resolution luma of 1080p and 720p frames.
+// The motion luma the renderer uses for 720p and larger frames (the cap in MotionLuma.kt), and the uncapped 1/4 luma
+// of a 1080p frame, kept for comparison with the earlier measurements.
+private const val CAPPED_WIDTH = 320
+private const val CAPPED_HEIGHT = 180
 private const val QUARTER_1080P_WIDTH = 480
 private const val QUARTER_1080P_HEIGHT = 270
-private const val QUARTER_720P_WIDTH = 320
-private const val QUARTER_720P_HEIGHT = 180
 
 /**
  * Wall-clock time of one motion search, from the first GL call to glFinish, on a 5 px pan. This is the number the plan's
@@ -57,10 +58,10 @@ class GpuMotionSearchBenchmark {
     }
 
     @Test
-    fun quarterResolution1080p() = measure("1080p", QUARTER_1080P_WIDTH, QUARTER_1080P_HEIGHT)
+    fun cappedMotionLuma() = measure("720p and up, capped", CAPPED_WIDTH, CAPPED_HEIGHT)
 
     @Test
-    fun quarterResolution720p() = measure("720p", QUARTER_720P_WIDTH, QUARTER_720P_HEIGHT)
+    fun uncappedQuarterResolution1080p() = measure("1080p uncapped", QUARTER_1080P_WIDTH, QUARTER_1080P_HEIGHT)
 
     private fun measure(label: String, width: Int, height: Int) {
         val random = Random(SEED)

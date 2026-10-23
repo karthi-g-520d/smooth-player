@@ -37,16 +37,17 @@ private const val ATTR_POSITION = 0
 private const val ATTR_UV = 1
 private const val UNIFORM_ROTATION = 0
 private const val UNIFORM_TEX_MATRIX = 2
-// Fragment-stage uniforms share location 6 across programs. Each program has its own uniforms, so the luma pass
-// (u_texel, a vec2) and the blend pass (u_t, a float) can both use it.
+// Fragment-stage uniforms share locations 6 and 7 across programs. Each program has its own uniforms, so the luma
+// pass (u_texel, a vec2, and u_taps, an int) and the blend pass (u_t, a float, and u_debugView) can both use them.
 private const val UNIFORM_TEXEL = 6
+private const val UNIFORM_TAPS = 7
 private const val UNIFORM_T = 6
 private const val UNIFORM_DEBUG_VIEW = 7
 private const val UV_OFFSET_BYTES = 2 * BYTES_PER_FLOAT
 private const val VERTEX_SHADER_ASSET = "shaders/quad.vert"
 private const val COPY_SHADER_ASSET = "shaders/oes_to_rgba.frag"
-private const val LUMA_QUARTER_SHADER_ASSET = "shaders/luma_quarter.frag"
-private const val LUMA_EIGHTH_SHADER_ASSET = "shaders/luma_eighth.frag"
+private const val LUMA_FINE_SHADER_ASSET = "shaders/luma_downsample.frag"
+private const val LUMA_COARSE_SHADER_ASSET = "shaders/luma_half.frag"
 private const val BLEND_SHADER_ASSET = "shaders/blend.frag"
 private const val TEXTURE_MATRIX_SIZE = 16
 private const val ROTATION_MATRIX_SIZE = 4
@@ -67,11 +68,13 @@ internal const val GPU_TIMERS_ENABLED = true
 internal const val LUMA_PASSES_ENABLED = true
 
 /**
- * Diagnostic switch for motion estimation. When on, each arriving frame's 1/4 luma is matched against the frame before
- * it on the GPU. Nothing shows the vectors yet. Needs [LUMA_PASSES_ENABLED].
+ * Diagnostic switch for motion estimation. When on, each arriving frame's motion luma is matched against the frame
+ * before it on the GPU. Nothing shows the vectors yet. Needs [LUMA_PASSES_ENABLED].
  *
  * Off by default until GpuMotionSearchBenchmark shows the search within the Step 6 bar on the target devices. The
  * first, raster-order search took 26 ms per 1080p pair on the vivo V2334 and dropped playback cadence to about 70%.
+ * The coarse-to-fine search on uncapped 1/4 luma took 6 to 8 ms and gave 93.9% cadence. The motion luma is now capped
+ * at 320x180 (see [motionLumaDivisor]), where the search measured about 4 ms.
  */
 internal const val MOTION_SEARCH_ENABLED = false
 
@@ -108,8 +111,8 @@ private val IDENTITY_4 = floatArrayOf(
  * GL side of playback. Owns one EGL context on the FI-GL thread, an external (OES) texture wrapped in a
  * [SurfaceTexture] for the decoder to write into, and an optional window surface to draw into.
  *
- * Each arriving frame is copied out of the OES texture into a [FrameRing] slot, with its luma at 1/4 and 1/8, and
- * its motion from the frame before is estimated on the 1/4 luma.
+ * Each arriving frame is copied out of the OES texture into a [FrameRing] slot, with its motion luma at two levels
+ * (see [FrameRing]), and its motion from the frame before is estimated on that luma.
  * On every vsync the window is drawn from the ring: the newest frame in [InterpolationMode.Duplicate], or the two
  * frames around the screen's content time in [InterpolationMode.Blend].
  *
@@ -150,8 +153,8 @@ internal class VideoRenderer(
     private var surfaceTexture: SurfaceTexture? = null
     private var textureId = 0
     private var copyProgram = 0
-    private var lumaQuarterProgram = 0
-    private var lumaEighthProgram = 0
+    private var lumaFineProgram = 0
+    private var lumaCoarseProgram = 0
     private var blendProgram = 0
     private var vertexArray = 0
     private var vertexBuffer = 0
@@ -327,8 +330,8 @@ internal class VideoRenderer(
             frameSurface = Surface(texture)
             val vertexSource = loadAsset(VERTEX_SHADER_ASSET)
             copyProgram = linkProgram(vertexSource, loadAsset(COPY_SHADER_ASSET))
-            lumaQuarterProgram = linkProgram(vertexSource, loadAsset(LUMA_QUARTER_SHADER_ASSET))
-            lumaEighthProgram = linkProgram(vertexSource, loadAsset(LUMA_EIGHTH_SHADER_ASSET))
+            lumaFineProgram = linkProgram(vertexSource, loadAsset(LUMA_FINE_SHADER_ASSET))
+            lumaCoarseProgram = linkProgram(vertexSource, loadAsset(LUMA_COARSE_SHADER_ASSET))
             blendProgram = linkProgram(vertexSource, loadAsset(BLEND_SHADER_ASSET))
             createVertexState()
             gpuTimers = if (GPU_TIMERS_ENABLED) GpuTimerRing.createIfSupported() else null
@@ -407,7 +410,7 @@ internal class VideoRenderer(
     }
 
     /**
-     * Copies the frame now in the OES texture into the next ring slot, then derives its luma at 1/4 and 1/8.
+     * Copies the frame now in the OES texture into the next ring slot, then derives its two motion-luma levels.
      * Runs once per arriving frame, never per vsync, so the cost does not grow with the refresh rate.
      */
     @GlThread
@@ -427,17 +430,18 @@ internal class VideoRenderer(
         }
 
         if (LUMA_PASSES_ENABLED) trace(TraceNames.GL_LUMA) {
-            frames.attach(frames.lumaQuarterTexture(slot), frames.quarterWidth, frames.quarterHeight)
-            GLES30.glUseProgram(lumaQuarterProgram)
+            frames.attach(frames.lumaFineTexture(slot), frames.fineWidth, frames.fineHeight)
+            GLES30.glUseProgram(lumaFineProgram)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(slot))
             GLES30.glUniform2f(UNIFORM_TEXEL, 1f / width, 1f / height)
+            GLES30.glUniform1i(UNIFORM_TAPS, motionLumaTaps(frames.motionLumaDivisor))
             drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = IDENTITY_4)
 
-            frames.attach(frames.lumaEighthTexture(slot), frames.eighthWidth, frames.eighthHeight)
-            GLES30.glUseProgram(lumaEighthProgram)
+            frames.attach(frames.lumaCoarseTexture(slot), frames.coarseWidth, frames.coarseHeight)
+            GLES30.glUseProgram(lumaCoarseProgram)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.lumaQuarterTexture(slot))
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.lumaFineTexture(slot))
             drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = IDENTITY_4)
         }
 
@@ -445,8 +449,9 @@ internal class VideoRenderer(
     }
 
     /**
-     * Matches [slot]'s luma against the frame before it, coarse to fine on the 1/8 and 1/4 levels. Runs once per arriving frame, so the vectors of a pair
-     * serve every refresh between the two frames.
+     * Matches [slot]'s luma against the frame before it, coarse to fine on the two motion-luma levels. Runs once per
+     * arriving frame, so the vectors of a pair serve every refresh between the two frames. The vectors are in fine
+     * motion-luma pixels: multiply by [FrameRing.motionLumaDivisor] for source pixels.
      */
     @GlThread
     private fun estimateMotion(frames: FrameRing, slot: Int) {
@@ -456,12 +461,12 @@ internal class VideoRenderer(
         trace(TraceNames.INTERP_ME) {
             val pass = {
                 search.run(
-                    frames.lumaQuarterTexture(previous),
-                    frames.lumaQuarterTexture(slot),
-                    frames.lumaEighthTexture(previous),
-                    frames.lumaEighthTexture(slot),
-                    frames.quarterWidth,
-                    frames.quarterHeight,
+                    frames.lumaFineTexture(previous),
+                    frames.lumaFineTexture(slot),
+                    frames.lumaCoarseTexture(previous),
+                    frames.lumaCoarseTexture(slot),
+                    frames.fineWidth,
+                    frames.fineHeight,
                 )
             }
             val timers = motionTimers
@@ -557,8 +562,8 @@ internal class VideoRenderer(
         ring?.close()
         ring = null
         GLES30.glDeleteProgram(copyProgram)
-        GLES30.glDeleteProgram(lumaQuarterProgram)
-        GLES30.glDeleteProgram(lumaEighthProgram)
+        GLES30.glDeleteProgram(lumaFineProgram)
+        GLES30.glDeleteProgram(lumaCoarseProgram)
         GLES30.glDeleteProgram(blendProgram)
         GLES30.glDeleteBuffers(1, intArrayOf(vertexBuffer), 0)
         GLES30.glDeleteVertexArrays(1, intArrayOf(vertexArray), 0)
