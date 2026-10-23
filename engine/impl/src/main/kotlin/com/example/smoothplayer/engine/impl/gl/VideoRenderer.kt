@@ -68,9 +68,12 @@ internal const val LUMA_PASSES_ENABLED = true
 
 /**
  * Diagnostic switch for motion estimation. When on, each arriving frame's 1/4 luma is matched against the frame before
- * it on the GPU. Nothing shows the vectors yet; the overlay reports the pass's GPU time. Needs [LUMA_PASSES_ENABLED].
+ * it on the GPU. Nothing shows the vectors yet. Needs [LUMA_PASSES_ENABLED].
+ *
+ * Off by default: the wavefront search measured 26 ms per 1080p pair on the vivo V2334 (GpuMotionSearchBenchmark),
+ * which dropped playback cadence to about 70%. Turn it on only to profile until a faster search lands.
  */
-internal const val MOTION_SEARCH_ENABLED = true
+internal const val MOTION_SEARCH_ENABLED = false
 
 /**
  * Diagnostic switch for the present draw. When on, each vsync still clears and swaps the window, but skips the blend
