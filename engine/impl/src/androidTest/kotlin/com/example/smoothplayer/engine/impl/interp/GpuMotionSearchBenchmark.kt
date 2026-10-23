@@ -69,15 +69,17 @@ class GpuMotionSearchBenchmark {
         val next = IntArray(width * height) { i -> plane.at(i % width - 5, i / width - 1) }
         val prevTexture = upload(width, height, prev)
         val nextTexture = upload(width, height, next)
+        val prevCoarse = uploadPlane(downsampled(plane))
+        val nextCoarse = uploadPlane(downsampled(LumaPlane(width, height, next)))
         val gpu = checkNotNull(search)
 
         repeat(WARM_UP_RUNS) {
-            gpu.run(prevTexture, nextTexture, width, height)
+            gpu.run(prevTexture, nextTexture, prevCoarse, nextCoarse, width, height)
             GLES30.glFinish()
         }
         val millis = DoubleArray(TIMED_RUNS) {
             val start = System.nanoTime()
-            gpu.run(prevTexture, nextTexture, width, height)
+            gpu.run(prevTexture, nextTexture, prevCoarse, nextCoarse, width, height)
             GLES30.glFinish()
             (System.nanoTime() - start) / NANOS_PER_MILLI
         }
@@ -90,6 +92,9 @@ class GpuMotionSearchBenchmark {
 
     private fun percentile(sorted: DoubleArray, fraction: Double): Double =
         sorted[(kotlin.math.ceil(fraction * sorted.size).toInt() - 1).coerceIn(0, sorted.size - 1)]
+
+    private fun uploadPlane(plane: LumaPlane): Int =
+        upload(plane.width, plane.height, IntArray(plane.width * plane.height) { i -> plane.at(i % plane.width, i / plane.width) })
 
     private fun upload(width: Int, height: Int, pixels: IntArray): Int {
         val bytes = ByteBuffer.allocateDirect(pixels.size)

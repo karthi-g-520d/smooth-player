@@ -7,6 +7,7 @@ import com.example.smoothplayer.engine.impl.threading.GlThread
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+private const val COARSE_SHADER_ASSET = "shaders/motion_coarse.comp"
 private const val SEARCH_SHADER_ASSET = "shaders/motion_search.comp"
 private const val MEDIAN_SHADER_ASSET = "shaders/motion_median.comp"
 private const val SEARCH_WORKGROUP_SIZE = 64
@@ -17,32 +18,33 @@ private const val MAX_LUMA = 255
 private const val UINT_BITS = 32
 // std430 layout of one block: ivec2 vector, vec2 subpixel, float residual, float pad.
 private const val BYTES_PER_BLOCK = 24
+// std430 layout of one coarse vector: ivec2.
+private const val BYTES_PER_COARSE_BLOCK = 8
 private const val BINDING_PREV_LUMA = 0
 private const val BINDING_NEXT_LUMA = 1
 private const val BINDING_RAW_FIELD = 0
 private const val BINDING_FILTERED_FIELD = 1
+private const val BINDING_COARSE_FIELD = 2
 private const val BINDING_MOTION_IMAGE = 0
 private const val LOC_PLANE_SIZE = 0
 private const val LOC_GRID = 1
-private const val LOC_WAVE = 2
-private const val LOC_FIRST_ROW = 3
 
 /**
- * The GPU form of [estimateMotion], as two GLES 3.1 compute passes: the block search (with its subpixel fit and
- * residual) and the 3x3 median. [estimateMotion] defines the result. Integer vectors match it exactly; subpixel
- * offsets and residuals match to float rounding.
+ * The GPU form of [estimateMotion], as three GLES 3.1 compute passes, each one dispatch over every block: the coarse
+ * search at 1/8, the refinement at 1/4 (with its subpixel fit and residual), and the 3x3 median. [estimateMotion]
+ * defines the result. Integer vectors match it exactly; subpixel offsets and residuals match to float rounding.
  *
- * The search runs one dispatch per wavefront of blocks (see [wavefrontCount]), so each block sees the same causal
- * predictor as on the CPU. The median pass writes [motionTexture], which the warp will sample.
+ * The median pass writes [motionTexture], which the warp will sample.
  *
  * Only the GL thread may use this class, with a GLES 3.1 context current. [close] frees its buffers and programs.
  */
 @GlThread
 internal class GpuMotionSearch private constructor(
+    private val coarseProgram: Int,
     private val searchProgram: Int,
     private val medianProgram: Int,
 ) : AutoCloseable {
-    private val buffers = IntArray(2)
+    private val buffers = IntArray(BUFFER_COUNT)
     private var planeWidth = 0
     private var planeHeight = 0
 
@@ -56,30 +58,29 @@ internal class GpuMotionSearch private constructor(
         private set
 
     /**
-     * Estimates the motion from [prevLuma] to [nextLuma], two R8 textures of [width] by [height]. The result is in
+     * Estimates the motion from the previous frame to the next. [prevLuma] and [nextLuma] are R8 textures of [width] by
+     * [height]; [prevCoarse] and [nextCoarse] are the same frames at half that size, rounded up. The result is in
      * [motionTexture] for later GL commands, and in [readBack] for the CPU.
      */
-    fun run(prevLuma: Int, nextLuma: Int, width: Int, height: Int) {
+    fun run(prevLuma: Int, nextLuma: Int, prevCoarse: Int, nextCoarse: Int, width: Int, height: Int) {
         ensureSize(width, height)
 
+        GLES31.glUseProgram(coarseProgram)
+        bindLuma(prevCoarse, nextCoarse)
+        GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_COARSE_FIELD, buffers[COARSE])
+        GLES31.glUniform2i(LOC_PLANE_SIZE, ceilDiv(width, 2), ceilDiv(height, 2))
+        GLES31.glUniform2i(LOC_GRID, columns, rows)
+        GLES31.glDispatchCompute(columns, rows, 1)
+        // The refinement reads the coarse vectors for its predictors.
+        GLES31.glMemoryBarrier(GLES31.GL_SHADER_STORAGE_BARRIER_BIT)
+
         GLES31.glUseProgram(searchProgram)
-        GLES31.glActiveTexture(GLES31.GL_TEXTURE0 + BINDING_PREV_LUMA)
-        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, prevLuma)
-        GLES31.glActiveTexture(GLES31.GL_TEXTURE0 + BINDING_NEXT_LUMA)
-        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, nextLuma)
+        bindLuma(prevLuma, nextLuma)
         GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_RAW_FIELD, buffers[RAW])
         GLES31.glUniform2i(LOC_PLANE_SIZE, width, height)
         GLES31.glUniform2i(LOC_GRID, columns, rows)
-        for (wave in 0 until wavefrontCount(columns, rows)) {
-            val firstRow = wavefrontFirstRow(wave, columns)
-            val lastRow = wavefrontLastRow(wave, rows)
-            if (lastRow < firstRow) continue
-            GLES31.glUniform1i(LOC_WAVE, wave)
-            GLES31.glUniform1i(LOC_FIRST_ROW, firstRow)
-            GLES31.glDispatchCompute(lastRow - firstRow + 1, 1, 1)
-            // The next wavefront reads this one's vectors for its predictors.
-            GLES31.glMemoryBarrier(GLES31.GL_SHADER_STORAGE_BARRIER_BIT)
-        }
+        GLES31.glDispatchCompute(columns, rows, 1)
+        GLES31.glMemoryBarrier(GLES31.GL_SHADER_STORAGE_BARRIER_BIT)
 
         GLES31.glUseProgram(medianProgram)
         GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_FILTERED_FIELD, buffers[FILTERED])
@@ -92,8 +93,16 @@ internal class GpuMotionSearch private constructor(
 
         // Nothing is left bound for the passes that follow.
         GLES31.glBindImageTexture(BINDING_MOTION_IMAGE, 0, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_RGBA16F)
+        GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_COARSE_FIELD, 0)
         GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_RAW_FIELD, 0)
         GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_FILTERED_FIELD, 0)
+    }
+
+    private fun bindLuma(prev: Int, next: Int) {
+        GLES31.glActiveTexture(GLES31.GL_TEXTURE0 + BINDING_PREV_LUMA)
+        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, prev)
+        GLES31.glActiveTexture(GLES31.GL_TEXTURE0 + BINDING_NEXT_LUMA)
+        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, next)
     }
 
     /**
@@ -123,6 +132,7 @@ internal class GpuMotionSearch private constructor(
 
     override fun close() {
         releaseFieldStorage()
+        GLES31.glDeleteProgram(coarseProgram)
         GLES31.glDeleteProgram(searchProgram)
         GLES31.glDeleteProgram(medianProgram)
     }
@@ -137,10 +147,11 @@ internal class GpuMotionSearch private constructor(
         rows = ceilDiv(height, BLOCK_SIZE)
 
         GLES31.glGenBuffers(buffers.size, buffers, 0)
-        for (buffer in buffers) {
+        for ((index, buffer) in buffers.withIndex()) {
+            val bytesPerBlock = if (index == COARSE) BYTES_PER_COARSE_BLOCK else BYTES_PER_BLOCK
             GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, buffer)
             GLES31.glBufferData(
-                GLES31.GL_SHADER_STORAGE_BUFFER, columns * rows * BYTES_PER_BLOCK, null, GLES31.GL_DYNAMIC_COPY,
+                GLES31.GL_SHADER_STORAGE_BUFFER, columns * rows * bytesPerBlock, null, GLES31.GL_DYNAMIC_COPY,
             )
         }
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
@@ -169,13 +180,15 @@ internal class GpuMotionSearch private constructor(
     }
 
     companion object {
-        private const val RAW = 0
-        private const val FILTERED = 1
+        private const val COARSE = 0
+        private const val RAW = 1
+        private const val FILTERED = 2
+        private const val BUFFER_COUNT = 3
         private val CONFIG = MotionSearchConfig()
         private val BLOCK_SIZE = CONFIG.blockSize
 
         /**
-         * Builds both programs for the default [MotionSearchConfig]. Null when the context is older than GLES 3.1.
+         * Builds the three programs for the default [MotionSearchConfig]. Null when the context is older than GLES 3.1.
          * Throws when a shader does not compile or link, with the driver's log.
          */
         fun createIfSupported(assets: AssetManager): GpuMotionSearch? {
@@ -186,28 +199,36 @@ internal class GpuMotionSearch private constructor(
                 return null
             }
             val defines = defines(CONFIG)
-            val search = linkCompute(withDefines(loadAsset(assets, SEARCH_SHADER_ASSET), defines))
-            val median = try {
-                linkCompute(withDefines(loadAsset(assets, MEDIAN_SHADER_ASSET), defines))
+            val programs = mutableListOf<Int>()
+            try {
+                for (asset in listOf(COARSE_SHADER_ASSET, SEARCH_SHADER_ASSET, MEDIAN_SHADER_ASSET)) {
+                    programs += linkCompute(withDefines(loadAsset(assets, asset), defines))
+                }
             } catch (e: IllegalStateException) {
-                GLES31.glDeleteProgram(search)
+                programs.forEach(GLES31::glDeleteProgram)
                 throw e
             }
-            return GpuMotionSearch(search, median)
+            return GpuMotionSearch(programs[0], programs[1], programs[2])
         }
 
         /** The shader constants. Kotlin is their only source, so the two sides cannot drift. */
         private fun defines(config: MotionSearchConfig): String {
-            val candidates = (2 * config.searchRange + 1) * (2 * config.searchRange + 1)
-            val candidateBits = UINT_BITS - Integer.numberOfLeadingZeros(candidates - 1)
-            // The search packs (cost, candidate index) into one uint, so the largest cost must fit above the index.
-            // A candidate and the predictor are each within the range, so they differ by at most 2 * range per axis.
-            val maxCost = config.blockSize * config.blockSize * MAX_LUMA +
-                config.smoothnessWeight * 2 * (2 * config.searchRange)
-            require(maxCost.toLong() shl candidateBits < (1L shl UINT_BITS)) { "cost does not fit beside the index" }
+            val coarseCandidates = (2 * config.coarseRange + 1) * (2 * config.coarseRange + 1)
+            val refineCandidates = (2 * config.refineRange + 1) * (2 * config.refineRange + 1)
+            val candidateBits = UINT_BITS - Integer.numberOfLeadingZeros(maxOf(coarseCandidates, refineCandidates) - 1)
+            // Each pass packs (cost, candidate index) into one uint, so its largest cost must fit above the index.
+            val maxCoarseCost = config.coarseBlockSize * config.coarseBlockSize * MAX_LUMA +
+                config.coarseWeight * 2 * config.coarseRange
+            val maxRefineCost = config.blockSize * config.blockSize * MAX_LUMA +
+                config.smoothnessWeight * 2 * config.refineRange
+            require(maxOf(maxCoarseCost, maxRefineCost).toLong() shl candidateBits < (1L shl UINT_BITS)) {
+                "cost does not fit beside the index"
+            }
             return """
                 #define BLOCK_SIZE ${config.blockSize}
-                #define SEARCH_RANGE ${config.searchRange}
+                #define COARSE_RANGE ${config.coarseRange}
+                #define REFINE_RANGE ${config.refineRange}
+                #define COARSE_WEIGHT ${config.coarseWeight}
                 #define SMOOTHNESS_WEIGHT ${config.smoothnessWeight}
                 #define CANDIDATE_BITS $candidateBits
                 #define SEARCH_WORKGROUP_SIZE $SEARCH_WORKGROUP_SIZE
@@ -216,11 +237,10 @@ internal class GpuMotionSearch private constructor(
                 #define BINDING_NEXT_LUMA $BINDING_NEXT_LUMA
                 #define BINDING_RAW_FIELD $BINDING_RAW_FIELD
                 #define BINDING_FILTERED_FIELD $BINDING_FILTERED_FIELD
+                #define BINDING_COARSE_FIELD $BINDING_COARSE_FIELD
                 #define BINDING_MOTION_IMAGE $BINDING_MOTION_IMAGE
                 #define LOC_PLANE_SIZE $LOC_PLANE_SIZE
                 #define LOC_GRID $LOC_GRID
-                #define LOC_WAVE $LOC_WAVE
-                #define LOC_FIRST_ROW $LOC_FIRST_ROW
             """.trimIndent()
         }
 

@@ -1,27 +1,30 @@
 #version 310 es
-// Full-search block matching on luma: the GPU form of estimateMotion in MotionSearch.kt, which defines the result.
-// Change the two together. The defines (block size, search range, bindings, locations) come from GpuMotionSearch.kt.
+// Refinement at 1/4 resolution: the GPU form of the fine level of estimateMotion in MotionSearch.kt, which defines
+// the result. Change the two together. The defines (block size, ranges, bindings, locations) come from
+// GpuMotionSearch.kt.
 //
-// One work group per block. Blocks are dispatched one wavefront at a time (bx + 2 * by == u_wave), so a block's left,
-// upper and upper-right neighbours are already written when it reads them for its predictor, as in the CPU's raster
-// order. The previous frame's search area and the next frame's block are loaded into shared memory once. Each
-// invocation then scores a share of the candidate vectors, and an atomicMin on (cost, candidate index) keeps the
-// cheapest, with ties going to the first candidate in raster order, as on the CPU.
+// One work group per block, all blocks in one dispatch: the predictor comes from the coarse pass, not from
+// neighbouring blocks at this level. The predictor is the median of the 3x3 coarse neighbourhood, doubled. The
+// previous frame's search area and the next frame's block are loaded into shared memory once. Each invocation then
+// scores a share of the offsets within ±REFINE_RANGE of the predictor, and an atomicMin on (cost, candidate index)
+// keeps the cheapest, with ties going to the first candidate in raster order, as on the CPU.
 //
-// IN : u_prevLuma, u_nextLuma (R8 luma), u_planeSize (luma size in pixels), u_grid (block columns and rows),
-//      u_wave, u_firstRow (the wavefront and its first block row), b_raw (neighbours from earlier wavefronts)
+// IN : u_prevLuma, u_nextLuma (R8 luma at 1/4), u_planeSize (1/4 size in pixels), u_grid (block columns and rows),
+//      b_coarse (the coarse pass's vectors)
 // OUT: b_raw[block] = integer vector, subpixel offset and residual, before the median filter
 precision highp float;
 precision highp int;
 
 layout(local_size_x = SEARCH_WORKGROUP_SIZE) in;
 
-#define TILE_MARGIN (SEARCH_RANGE + 1)
+// The predictor reaches ±2 * COARSE_RANGE, the offset ±REFINE_RANGE, and the subpixel fit one pixel more.
+#define TILE_MARGIN (2 * COARSE_RANGE + REFINE_RANGE + 1)
 #define TILE_SIDE (BLOCK_SIZE + 2 * TILE_MARGIN)
-#define CANDIDATE_SIDE (2 * SEARCH_RANGE + 1)
+#define CANDIDATE_SIDE (2 * REFINE_RANGE + 1)
 #define CANDIDATE_COUNT (CANDIDATE_SIDE * CANDIDATE_SIDE)
 #define BLOCK_PIXELS (BLOCK_SIZE * BLOCK_SIZE)
 #define FIT_SAMPLES 5
+#define NEIGHBOURHOOD 9
 
 struct Block {
     ivec2 vector;
@@ -32,13 +35,12 @@ struct Block {
 
 layout(binding = BINDING_PREV_LUMA) uniform highp sampler2D u_prevLuma;
 layout(binding = BINDING_NEXT_LUMA) uniform highp sampler2D u_nextLuma;
-layout(std430, binding = BINDING_RAW_FIELD) buffer RawField { Block b_raw[]; };
+layout(std430, binding = BINDING_COARSE_FIELD) readonly buffer CoarseField { ivec2 b_coarse[]; };
+layout(std430, binding = BINDING_RAW_FIELD) writeonly buffer RawField { Block b_raw[]; };
 layout(location = LOC_PLANE_SIZE) uniform ivec2 u_planeSize;
 layout(location = LOC_GRID) uniform ivec2 u_grid;
-layout(location = LOC_WAVE) uniform int u_wave;
-layout(location = LOC_FIRST_ROW) uniform int u_firstRow;
 
-// The previous frame around the block, with one extra pixel of margin for the subpixel fit at the range's edge.
+// The previous frame around the block, wide enough for every candidate and the subpixel fit around it.
 shared int s_prev[TILE_SIDE * TILE_SIDE];
 shared int s_next[BLOCK_PIXELS];
 shared uint s_best;
@@ -60,37 +62,34 @@ int nextAt(ivec2 p) {
     return int(round(texelFetch(u_nextLuma, clamp(p, ivec2(0), u_planeSize - 1), 0).r * MAX_LUMA));
 }
 
-// Median of the causal neighbours that exist, taken as the CPU does: sort them and pick index count / 2.
-int medianOfNeighbours(int values[3], int count) {
-    if (count == 0) return 0;
-    if (count == 1) return values[0];
-    if (count == 2) return max(values[0], values[1]);
-    return max(min(values[0], values[1]), min(max(values[0], values[1]), values[2]));
+int medianOf(int values[NEIGHBOURHOOD]) {
+    for (int i = 1; i < NEIGHBOURHOOD; i++) {
+        int value = values[i];
+        int j = i - 1;
+        while (j >= 0 && values[j] > value) {
+            values[j + 1] = values[j];
+            j--;
+        }
+        values[j + 1] = value;
+    }
+    return values[NEIGHBOURHOOD / 2];
 }
 
-ivec2 predictor(int bx, int by) {
-    int xs[3];
-    int ys[3];
-    int count = 0;
-    if (bx > 0) {
-        ivec2 v = b_raw[by * u_grid.x + bx - 1].vector;
-        xs[count] = v.x;
-        ys[count] = v.y;
-        count++;
+// Median of the 3x3 coarse neighbourhood, per component, doubled to 1/4 resolution. Edges repeat the nearest block.
+ivec2 predictor(ivec2 block) {
+    int xs[NEIGHBOURHOOD];
+    int ys[NEIGHBOURHOOD];
+    int n = 0;
+    for (int oy = -1; oy <= 1; oy++) {
+        for (int ox = -1; ox <= 1; ox++) {
+            ivec2 source = clamp(block + ivec2(ox, oy), ivec2(0), u_grid - 1);
+            ivec2 v = b_coarse[source.y * u_grid.x + source.x];
+            xs[n] = v.x;
+            ys[n] = v.y;
+            n++;
+        }
     }
-    if (by > 0) {
-        ivec2 v = b_raw[(by - 1) * u_grid.x + bx].vector;
-        xs[count] = v.x;
-        ys[count] = v.y;
-        count++;
-    }
-    if (by > 0 && bx + 1 < u_grid.x) {
-        ivec2 v = b_raw[(by - 1) * u_grid.x + bx + 1].vector;
-        xs[count] = v.x;
-        ys[count] = v.y;
-        count++;
-    }
-    return ivec2(medianOfNeighbours(xs, count), medianOfNeighbours(ys, count));
+    return 2 * ivec2(medianOf(xs), medianOf(ys));
 }
 
 // SAD of the block's in-plane pixels against the previous frame displaced by v: next(p) against prev(p - v).
@@ -132,16 +131,15 @@ float subpixelOffset(int before, int centre, int after) {
 }
 
 void main() {
-    int by = u_firstRow + int(gl_WorkGroupID.x);
-    int bx = u_wave - 2 * by;
-    ivec2 origin = ivec2(bx, by) * BLOCK_SIZE;
+    ivec2 block = ivec2(gl_WorkGroupID.xy);
+    ivec2 origin = block * BLOCK_SIZE;
     // Blocks on the right and bottom edges can hang off the plane. Only their in-plane pixels count.
     ivec2 valid = min(ivec2(BLOCK_SIZE), u_planeSize - origin);
     int lane = int(gl_LocalInvocationIndex);
 
     if (lane == 0) {
         s_best = 0xFFFFFFFFu;
-        s_predictor = predictor(bx, by);
+        s_predictor = predictor(block);
     }
     ivec2 tileOrigin = origin - TILE_MARGIN;
     for (int i = lane; i < TILE_SIDE * TILE_SIDE; i += SEARCH_WORKGROUP_SIZE) {
@@ -155,16 +153,16 @@ void main() {
 
     ivec2 pred = s_predictor;
     for (int c = lane; c < CANDIDATE_COUNT; c += SEARCH_WORKGROUP_SIZE) {
-        ivec2 v = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - SEARCH_RANGE;
-        int penalty = SMOOTHNESS_WEIGHT * (abs(v.x - pred.x) + abs(v.y - pred.y));
-        uint cost = uint(candidateSad(v, valid) + penalty);
+        ivec2 offset = ivec2(c % CANDIDATE_SIDE, c / CANDIDATE_SIDE) - REFINE_RANGE;
+        int penalty = SMOOTHNESS_WEIGHT * (abs(offset.x) + abs(offset.y));
+        uint cost = uint(candidateSad(pred + offset, valid) + penalty);
         atomicMin(s_best, (cost << CANDIDATE_BITS) | uint(c));
     }
     memoryBarrierShared();
     barrier();
 
     int candidate = int(s_best & ((1u << CANDIDATE_BITS) - 1u));
-    ivec2 best = ivec2(candidate % CANDIDATE_SIDE, candidate / CANDIDATE_SIDE) - SEARCH_RANGE;
+    ivec2 best = pred + ivec2(candidate % CANDIDATE_SIDE, candidate / CANDIDATE_SIDE) - REFINE_RANGE;
     if (lane < FIT_SAMPLES) {
         s_fitSad[lane] = candidateSad(best + FIT_OFFSETS[lane], valid);
     }
@@ -180,6 +178,6 @@ void main() {
             subpixelOffset(s_fitSad[3], centre, s_fitSad[4]));
         result.residual = float(centre) / (blockDetail(valid) + 1.0);
         result.pad = 0.0;
-        b_raw[by * u_grid.x + bx] = result;
+        b_raw[block.y * u_grid.x + block.x] = result;
     }
 }

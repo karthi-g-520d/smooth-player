@@ -70,8 +70,8 @@ internal const val LUMA_PASSES_ENABLED = true
  * Diagnostic switch for motion estimation. When on, each arriving frame's 1/4 luma is matched against the frame before
  * it on the GPU. Nothing shows the vectors yet. Needs [LUMA_PASSES_ENABLED].
  *
- * Off by default: the wavefront search measured 26 ms per 1080p pair on the vivo V2334 (GpuMotionSearchBenchmark),
- * which dropped playback cadence to about 70%. Turn it on only to profile until a faster search lands.
+ * Off by default until GpuMotionSearchBenchmark shows the search within the Step 6 bar on the target devices. The
+ * first, raster-order search took 26 ms per 1080p pair on the vivo V2334 and dropped playback cadence to about 70%.
  */
 internal const val MOTION_SEARCH_ENABLED = false
 
@@ -445,7 +445,7 @@ internal class VideoRenderer(
     }
 
     /**
-     * Matches [slot]'s 1/4 luma against the frame before it. Runs once per arriving frame, so the vectors of a pair
+     * Matches [slot]'s luma against the frame before it, coarse to fine on the 1/8 and 1/4 levels. Runs once per arriving frame, so the vectors of a pair
      * serve every refresh between the two frames.
      */
     @GlThread
@@ -458,6 +458,8 @@ internal class VideoRenderer(
                 search.run(
                     frames.lumaQuarterTexture(previous),
                     frames.lumaQuarterTexture(slot),
+                    frames.lumaEighthTexture(previous),
+                    frames.lumaEighthTexture(slot),
                     frames.quarterWidth,
                     frames.quarterHeight,
                 )

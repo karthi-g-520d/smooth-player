@@ -1,5 +1,6 @@
 #version 310 es
-// 3x3 component-wise median of the motion field: the GPU form of medianFiltered in MotionSearch.kt. Edges repeat the
+// 3x3 component-wise median of the motion field: the GPU form of medianFiltered in MotionSearch.kt. The median is over
+// total vectors (integer plus subpixel), split back into the nearest integer and a subpixel offset. Edges repeat the
 // nearest block. The residual is kept per block, not filtered. The defines come from GpuMotionSearch.kt.
 //
 // IN : b_raw (the search pass's field), u_grid (block columns and rows)
@@ -13,6 +14,8 @@ layout(local_size_x = MEDIAN_WORKGROUP_SIDE, local_size_y = MEDIAN_WORKGROUP_SID
 #define NEIGHBOURHOOD 9
 #define MIDDLE (NEIGHBOURHOOD / 2)
 
+const float HALF_PIXEL = 0.5;
+
 struct Block {
     ivec2 vector;
     vec2 subpixel;
@@ -24,18 +27,6 @@ layout(std430, binding = BINDING_RAW_FIELD) readonly buffer RawField { Block b_r
 layout(std430, binding = BINDING_FILTERED_FIELD) writeonly buffer FilteredField { Block b_filtered[]; };
 layout(rgba16f, binding = BINDING_MOTION_IMAGE) writeonly uniform highp image2D u_motionImage;
 layout(location = LOC_GRID) uniform ivec2 u_grid;
-
-void sortInts(inout int values[NEIGHBOURHOOD]) {
-    for (int i = 1; i < NEIGHBOURHOOD; i++) {
-        int value = values[i];
-        int j = i - 1;
-        while (j >= 0 && values[j] > value) {
-            values[j + 1] = values[j];
-            j--;
-        }
-        values[j + 1] = value;
-    }
-}
 
 void sortFloats(inout float values[NEIGHBOURHOOD]) {
     for (int i = 1; i < NEIGHBOURHOOD; i++) {
@@ -53,33 +44,28 @@ void main() {
     ivec2 block = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(block, u_grid))) return;
 
-    int xs[NEIGHBOURHOOD];
-    int ys[NEIGHBOURHOOD];
-    float subXs[NEIGHBOURHOOD];
-    float subYs[NEIGHBOURHOOD];
+    float xs[NEIGHBOURHOOD];
+    float ys[NEIGHBOURHOOD];
     int n = 0;
     for (int oy = -1; oy <= 1; oy++) {
         for (int ox = -1; ox <= 1; ox++) {
             ivec2 source = clamp(block + ivec2(ox, oy), ivec2(0), u_grid - 1);
             Block b = b_raw[source.y * u_grid.x + source.x];
-            xs[n] = b.vector.x;
-            ys[n] = b.vector.y;
-            subXs[n] = b.subpixel.x;
-            subYs[n] = b.subpixel.y;
+            xs[n] = float(b.vector.x) + b.subpixel.x;
+            ys[n] = float(b.vector.y) + b.subpixel.y;
             n++;
         }
     }
-    sortInts(xs);
-    sortInts(ys);
-    sortFloats(subXs);
-    sortFloats(subYs);
+    sortFloats(xs);
+    sortFloats(ys);
 
     int index = block.y * u_grid.x + block.x;
     Block filtered;
-    filtered.vector = ivec2(xs[MIDDLE], ys[MIDDLE]);
-    filtered.subpixel = vec2(subXs[MIDDLE], subYs[MIDDLE]);
+    vec2 total = vec2(xs[MIDDLE], ys[MIDDLE]);
+    filtered.vector = ivec2(floor(total + HALF_PIXEL));
+    filtered.subpixel = total - vec2(filtered.vector);
     filtered.residual = b_raw[index].residual;
     filtered.pad = 0.0;
     b_filtered[index] = filtered;
-    imageStore(u_motionImage, block, vec4(vec2(filtered.vector) + filtered.subpixel, filtered.residual, 1.0));
+    imageStore(u_motionImage, block, vec4(total, filtered.residual, 1.0));
 }

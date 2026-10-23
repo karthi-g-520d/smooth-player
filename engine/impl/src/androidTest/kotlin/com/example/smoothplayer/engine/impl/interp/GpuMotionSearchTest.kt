@@ -78,9 +78,20 @@ class GpuMotionSearchTest {
     }
 
     private fun compare(width: Int, height: Int, prev: IntArray, next: IntArray) {
-        val expected = estimateMotion(LumaPlane(width, height, prev), LumaPlane(width, height, next))
+        val prevPlane = LumaPlane(width, height, prev)
+        val nextPlane = LumaPlane(width, height, next)
+        val prevCoarse = downsampled(prevPlane)
+        val nextCoarse = downsampled(nextPlane)
+        val expected = estimateMotion(prevPlane, nextPlane, prevCoarse, nextCoarse)
         val gpu = checkNotNull(search)
-        gpu.run(upload(width, height, prev), upload(width, height, next), width, height)
+        gpu.run(
+            upload(width, height, prev),
+            upload(width, height, next),
+            upload(prevCoarse.width, prevCoarse.height, pixelsOf(prevCoarse)),
+            upload(nextCoarse.width, nextCoarse.height, pixelsOf(nextCoarse)),
+            width,
+            height,
+        )
         val actual = gpu.readBack()
 
         assertEquals(expected.columns, actual.columns)
@@ -97,6 +108,10 @@ class GpuMotionSearchTest {
                 residualError <= RESIDUAL_RELATIVE_TOLERANCE * maxOf(1f, expected.residual[i]),
             )
         }
+    }
+
+    private fun pixelsOf(plane: LumaPlane): IntArray = IntArray(plane.width * plane.height) { i ->
+        plane.at(i % plane.width, i / plane.width)
     }
 
     private fun noise(width: Int, height: Int, random: Random): IntArray = IntArray(width * height) { random.nextInt(MAX_LUMA) }
