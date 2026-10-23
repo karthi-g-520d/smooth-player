@@ -183,6 +183,8 @@ public class PlayerFragment(
             avDrift?.let { getString(R.string.player_stats_drift, it.value / MICROS_PER_MILLI) } ?: notAvailable(),
             presentGpuP50?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
             presentGpuP95?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+            motionGpuP50?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+            motionGpuP95?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
             refreshHz,
             thermalHeadroom?.let { getString(R.string.player_stats_thermal, it) } ?: notAvailable(),
             cadenceText(),

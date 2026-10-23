@@ -18,12 +18,28 @@ private const val GPU_SAMPLES = 120
 private const val NANOS_PER_SECOND = 1_000_000_000.0
 private const val THERMAL_FORECAST_SECONDS = 0
 
+/** The last [GPU_SAMPLES] GPU times of one pass, in nanoseconds. The caller holds the telemetry lock. */
+private class GpuSamples {
+    private val samplesNs = LongArray(GPU_SAMPLES)
+    private var count = 0
+    private var next = 0
+
+    fun add(durationNs: Long) {
+        samplesNs[next] = durationNs
+        next = (next + 1) % GPU_SAMPLES
+        if (count < GPU_SAMPLES) count++
+    }
+
+    /** The valid samples in ascending order. Copying here keeps the ring writable while the stats are computed. */
+    fun sorted(): LongArray = samplesNs.copyOf(count).also { it.sort() }
+}
+
 /**
  * Collects per-frame facts from the decoder and GL threads and publishes [PlaybackStats] about once a second.
  * Also writes one CSV row per released frame while logging is on.
  *
- * The decoder thread calls [onFrameReleased]. The GL thread calls [onPresentGpu]. Both are serialised on [lock],
- * which is held only for a few arithmetic operations, except for the CSV write.
+ * The decoder thread calls [onFrameReleased]. The GL thread calls [onPresentGpu] and [onMotionGpu]. All are serialised
+ * on [lock], which is held only for a few arithmetic operations, except for the CSV write.
  */
 internal class FrameTelemetry(
     private val context: Context,
@@ -60,9 +76,8 @@ internal class FrameTelemetry(
     private var totalRuns = 0L
     private var totalExactRuns = 0L
 
-    private val gpuSamplesNs = LongArray(GPU_SAMPLES)
-    private var gpuCount = 0
-    private var gpuNext = 0
+    private val presentGpu = GpuSamples()
+    private val motionGpu = GpuSamples()
 
     /** Clears the per-playback counters. A log file that is already open keeps writing. */
     fun reset(masterIsAudio: Boolean) {
@@ -167,11 +182,12 @@ internal class FrameTelemetry(
 
     /** Records one GPU time for the present pass. Called on the GL thread. */
     fun onPresentGpu(duration: Nanos) {
-        synchronized(lock) {
-            gpuSamplesNs[gpuNext] = duration.value
-            gpuNext = (gpuNext + 1) % GPU_SAMPLES
-            if (gpuCount < GPU_SAMPLES) gpuCount++
-        }
+        synchronized(lock) { presentGpu.add(duration.value) }
+    }
+
+    /** Records one GPU time for motion estimation on a frame pair. Called on the GL thread. */
+    fun onMotionGpu(duration: Nanos) {
+        synchronized(lock) { motionGpu.add(duration.value) }
     }
 
     /** Opens [file] and writes the CSV header. Returns the path, which the engine publishes in its stats. */
@@ -209,7 +225,8 @@ internal class FrameTelemetry(
 
     private fun snapshotLocked(nowNs: Long): PlaybackStats {
         val elapsedSeconds = (nowNs - (windowStartNs ?: nowNs)).coerceAtLeast(1L) / NANOS_PER_SECOND
-        val gpu = gpuSnapshotLocked()
+        val gpu = presentGpu.sorted()
+        val motion = motionGpu.sorted()
         lastThermal = thermalHeadroom()
         return PlaybackStats(
             displayFps = (windowRendered / elapsedSeconds).toFloat(),
@@ -219,6 +236,8 @@ internal class FrameTelemetry(
             avDrift = lastDrift,
             presentGpuP50 = percentile(gpu, P50)?.let { Nanos(it) },
             presentGpuP95 = percentile(gpu, P95)?.let { Nanos(it) },
+            motionGpuP50 = percentile(motion, P50)?.let { Nanos(it) },
+            motionGpuP95 = percentile(motion, P95)?.let { Nanos(it) },
             refreshHz = refreshHz(),
             thermalHeadroom = lastThermal,
             cadenceExactPercent = if (windowRuns > 0L) windowExactRuns * PERCENT / windowRuns else null,
@@ -227,12 +246,6 @@ internal class FrameTelemetry(
         )
     }
 
-    /** The valid GPU samples in ascending order. Copying here keeps the ring writable while the stats are computed. */
-    private fun gpuSnapshotLocked(): LongArray {
-        val copy = gpuSamplesNs.copyOf(gpuCount)
-        copy.sort()
-        return copy
-    }
 
     private fun refreshHz(): Float {
         val display = context.getSystemService(DisplayManager::class.java)

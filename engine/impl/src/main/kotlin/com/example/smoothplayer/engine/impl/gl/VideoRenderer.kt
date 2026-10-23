@@ -8,11 +8,13 @@ import android.opengl.GLES30
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import android.view.Surface
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.engine.impl.clock.MasterClock
+import com.example.smoothplayer.engine.impl.interp.GpuMotionSearch
 import com.example.smoothplayer.engine.impl.pacer.VsyncPacer
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
 import com.example.smoothplayer.engine.impl.telemetry.TraceNames
@@ -24,6 +26,7 @@ import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
+private const val TAG = "FI/GL"
 private const val GL_THREAD_NAME = "FI-GL"
 private const val SETUP_TIMEOUT_MS = 2_000L
 private const val RELEASE_TIMEOUT_MS = 500L
@@ -64,6 +67,12 @@ internal const val GPU_TIMERS_ENABLED = true
 internal const val LUMA_PASSES_ENABLED = true
 
 /**
+ * Diagnostic switch for motion estimation. When on, each arriving frame's 1/4 luma is matched against the frame before
+ * it on the GPU. Nothing shows the vectors yet; the overlay reports the pass's GPU time. Needs [LUMA_PASSES_ENABLED].
+ */
+internal const val MOTION_SEARCH_ENABLED = true
+
+/**
  * Diagnostic switch for the present draw. When on, each vsync still clears and swaps the window, but skips the blend
  * draw, so the picture is black. If misses drop with it on, the draw is the cause. If they stay, the cause is the
  * swap waiting on the compositor.
@@ -96,7 +105,8 @@ private val IDENTITY_4 = floatArrayOf(
  * GL side of playback. Owns one EGL context on the FI-GL thread, an external (OES) texture wrapped in a
  * [SurfaceTexture] for the decoder to write into, and an optional window surface to draw into.
  *
- * Each arriving frame is copied out of the OES texture into a [FrameRing] slot, with its luma at 1/4 and 1/8.
+ * Each arriving frame is copied out of the OES texture into a [FrameRing] slot, with its luma at 1/4 and 1/8, and
+ * its motion from the frame before is estimated on the 1/4 luma.
  * On every vsync the window is drawn from the ring: the newest frame in [InterpolationMode.Duplicate], or the two
  * frames around the screen's content time in [InterpolationMode.Blend].
  *
@@ -144,6 +154,8 @@ internal class VideoRenderer(
     private var vertexBuffer = 0
     private var ring: FrameRing? = null
     private var gpuTimers: GpuTimerRing? = null
+    private var motionSearch: GpuMotionSearch? = null
+    private var motionTimers: GpuTimerRing? = null
     @Volatile private var pacer: VsyncPacer? = null
     private var paced = false
     private val texMatrix = FloatArray(TEXTURE_MATRIX_SIZE)
@@ -317,6 +329,8 @@ internal class VideoRenderer(
             blendProgram = linkProgram(vertexSource, loadAsset(BLEND_SHADER_ASSET))
             createVertexState()
             gpuTimers = if (GPU_TIMERS_ENABLED) GpuTimerRing.createIfSupported() else null
+            motionSearch = if (MOTION_SEARCH_ENABLED && LUMA_PASSES_ENABLED) createMotionSearch() else null
+            motionTimers = if (GPU_TIMERS_ENABLED && motionSearch != null) GpuTimerRing.createIfSupported() else null
             pacer = VsyncPacer(handler) { presentNs, periodNs -> onVsync(presentNs, periodNs) }
         } catch (e: Exception) {
             // Reported to the decoder thread by awaitFrameSurface, instead of crashing the GL thread.
@@ -325,6 +339,18 @@ internal class VideoRenderer(
             frameSurfaceReady.countDown()
         }
     }
+
+    /** Null when the device has no GLES 3.1 or a shader fails to build. Playback then goes on without it. */
+    @GlThread
+    private fun createMotionSearch(): GpuMotionSearch? =
+        try {
+            GpuMotionSearch.createIfSupported(assets).also {
+                if (it == null) Log.w(TAG, "no GLES 3.1, motion search off")
+            }
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "motion search off", e)
+            null
+        }
 
     @GlThread
     private fun createExternalTexture(): Int {
@@ -410,6 +436,31 @@ internal class VideoRenderer(
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.lumaQuarterTexture(slot))
             drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = IDENTITY_4)
+        }
+
+        if (LUMA_PASSES_ENABLED) estimateMotion(frames, slot)
+    }
+
+    /**
+     * Matches [slot]'s 1/4 luma against the frame before it. Runs once per arriving frame, so the vectors of a pair
+     * serve every refresh between the two frames.
+     */
+    @GlThread
+    private fun estimateMotion(frames: FrameRing, slot: Int) {
+        val search = motionSearch ?: return
+        val previous = frames.previous(slot)
+        if (frames.pts(previous) == EMPTY_SLOT_PTS_US) return
+        trace(TraceNames.INTERP_ME) {
+            val pass = {
+                search.run(
+                    frames.lumaQuarterTexture(previous),
+                    frames.lumaQuarterTexture(slot),
+                    frames.quarterWidth,
+                    frames.quarterHeight,
+                )
+            }
+            val timers = motionTimers
+            if (timers != null) timers.time(pass, telemetry::onMotionGpu) else pass()
         }
     }
 
@@ -511,6 +562,10 @@ internal class VideoRenderer(
         paced = false
         gpuTimers?.close()
         gpuTimers = null
+        motionTimers?.close()
+        motionTimers = null
+        motionSearch?.close()
+        motionSearch = null
         eglCore.close()
         core = null
     }

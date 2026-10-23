@@ -4,7 +4,18 @@ Android app that plays local video files and generates extra frames in real time
 
 ## Current status
 
-No code written yet. Next step is Phase 1 / Step 1: project setup, Hello GL on a dedicated thread, device capability probe. See the plan below.
+Phase 1 Steps 1–5 are done and accepted. Step 6 (motion estimation) is in progress. The plan records each step's measured results and accepted exceptions.
+
+- **Done:** capability probe screen with JSON export (Step 1); MediaCodec → SurfaceTexture → GL player with audio-clock A/V sync, seek, and lifecycle tests (Step 2); debug overlay, GPU timers, Perfetto sections, telemetry CSV (Step 3); vsync-driven 60 Hz pacing, 98.9% cadence, accepted below the 99.5% bar (Step 4); 4-slot frame ring with 1/4 and 1/8 luma, Duplicate and Blend modes (Step 5).
+- **Step 6 so far:** CPU reference block matcher (`engine/impl/.../interp/MotionSearch.kt`) and its GPU form (`GpuMotionSearch.kt`, `assets/shaders/motion_search.comp` + `motion_median.comp`), which must give the same field. The renderer runs it once per decoded frame on the 1/4 luma, and the overlay shows its GPU time. Still to do: on-device timing against the ≤ 3/5 ms bar, the MV visualization debug view, and the synthetic-pan clip check.
+- **Not started:** Step 7 (MC warp, confidence, scene cuts, fallbacks), Step 8 (benchmarks, Go/No-Go).
+- **Devices:** only the vivo V2334 (mid-range) so far. The plan also needs a flagship.
+
+## Building and testing
+
+- CI (`.github/workflows/ci.yml`) runs unit tests, lint and `assembleDebug` on every PR into `main`. It is the build check.
+- Cloud sessions can't build the app: there's no Android SDK (dl.google.com is blocked), and Gradle's daemon wants JDK 25 from foojay, which is also blocked. Pure-Kotlin code and its tests can be compiled with a standalone `kotlinc`. Shaders can be checked with `glslangValidator`, and compute shaders can run on Mesa llvmpipe (GLES 3.1) through EGL surfaceless.
+- Instrumented tests (`src/androidTest`) run only on a real device: `./gradlew :engine:impl:connectedDebugAndroidTest`.
 
 ## Required reading before writing code
 

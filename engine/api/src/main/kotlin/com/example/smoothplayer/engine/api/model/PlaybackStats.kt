@@ -14,6 +14,9 @@ public data class PlaybackStats(
     val avDrift: Micros? = null,
     val presentGpuP50: Nanos? = null,
     val presentGpuP95: Nanos? = null,
+    /** GPU time of motion estimation for one frame pair, run once per decoded frame. */
+    val motionGpuP50: Nanos? = null,
+    val motionGpuP95: Nanos? = null,
     val refreshHz: Float = 0f,
     val thermalHeadroom: Float? = null,
     /** Percent of content frames, over the last second, that stayed on screen for exactly the expected number of refreshes. */

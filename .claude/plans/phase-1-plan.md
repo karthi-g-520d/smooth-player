@@ -314,6 +314,8 @@ Effort assumes one developer who knows Kotlin but is new to GL and codecs. "d" m
 
 **Acceptance:** on a synthetic pan clip (§6) the median vector error is under 0.5 px at 1/4 resolution. The field looks coherent on real pans. ME takes ≤ 3 ms on the flagship and ≤ 5 ms on mid-range at 1080p input, run once per source pair.
 
+**Status (2026-10-23):** the CPU reference (`MotionSearch.kt`) and its GPU form (`GpuMotionSearch.kt`, `motion_search.comp` and `motion_median.comp`) are written. The GPU form follows the v1 algorithm above: full search ±8 on 8×8 blocks at 1/4 resolution, the causal-median smoothness penalty, the parabola subpixel fit, the 3×3 median and an `RGBA16F` field texture. Blocks run in wavefronts (`bx + 2·by`), so each block sees the same predictor as the CPU's raster order. That costs 126 small dispatches per pair at 1080p. If the on-device time misses the bar, the v2 3DRS candidate search is the fallback. The GPU field matched the CPU field exactly (integer vectors, and floats to about 1e-8) on Mesa llvmpipe. ME runs once per decoded frame, and the overlay shows its GPU p50/p95. Still open: on-device timing, the MV visualization view, and the synthetic-pan clip check.
+
 ### Step 7: Frame generation — bidirectional warp, blending, occlusion and confidence, scene cuts, fallbacks (10–12 d)
 **Key focus:** artifact control matters more than raw sharpness. A fallback that degrades gracefully beats a clever warp that sometimes tears.
 - **Upsample the vector field** from block resolution to pixel resolution by bilinear sampling of the `RG16F` texture. Optionally use edge-aware joint-bilateral upsampling against full-res luma to reduce the "block halo" at object edges.
