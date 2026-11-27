@@ -85,6 +85,8 @@ internal class FrameTelemetry(
 
     private val presentGpu = GpuSamples()
     private val motionGpu = GpuSamples()
+    private val drawCpu = GpuSamples()
+    private var windowStatsPollMaxNs = 0L
 
     /** Clears the per-playback counters. A log file that is already open keeps writing. */
     fun reset(masterIsAudio: Boolean) {
@@ -156,6 +158,7 @@ internal class FrameTelemetry(
                 windowExactRuns = 0L
                 windowInBetween = 0L
                 windowWarped = 0L
+                windowStatsPollMaxNs = 0L
             }
         }
     }
@@ -217,6 +220,16 @@ internal class FrameTelemetry(
         synchronized(lock) { warpFallback = fallback }
     }
 
+    /** Records the GL thread's wall time to issue one present draw, swap excluded. Called on the GL thread. */
+    fun onDrawCpu(durationNs: Long) {
+        synchronized(lock) { drawCpu.add(durationNs) }
+    }
+
+    /** Records the wall time of one poll of a pair's stats fence (and read, when it had signalled). GL thread. */
+    fun onStatsPoll(durationNs: Long) {
+        synchronized(lock) { if (durationNs > windowStatsPollMaxNs) windowStatsPollMaxNs = durationNs }
+    }
+
     /** Records one GPU time for the present pass. Called on the GL thread. */
     fun onPresentGpu(duration: Nanos) {
         synchronized(lock) { presentGpu.add(duration.value) }
@@ -264,6 +277,7 @@ internal class FrameTelemetry(
         val elapsedSeconds = (nowNs - (windowStartNs ?: nowNs)).coerceAtLeast(1L) / NANOS_PER_SECOND
         val gpu = presentGpu.sorted()
         val motion = motionGpu.sorted()
+        val draw = drawCpu.sorted()
         lastThermal = readThermalHeadroom()
         return PlaybackStats(
             displayFps = (windowRendered / elapsedSeconds).toFloat(),
@@ -283,6 +297,8 @@ internal class FrameTelemetry(
             warpFallback = warpFallback,
             warpPercent = if (warpFallback != null && windowInBetween > 0L) windowWarped * PERCENT / windowInBetween else null,
             sceneCuts = totalSceneCuts,
+            drawCpuP95 = percentile(draw, P95)?.let { Nanos(it) },
+            statsPollMax = if (windowStatsPollMaxNs > 0L) Nanos(windowStatsPollMaxNs) else null,
         )
     }
 

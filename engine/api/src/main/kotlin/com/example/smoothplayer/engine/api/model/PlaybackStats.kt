@@ -30,4 +30,8 @@ public data class PlaybackStats(
     val warpPercent: Float? = null,
     /** Frame pairs since the file opened that were held rather than interpolated, because they span a scene cut. */
     val sceneCuts: Long = 0L,
+    /** The GL thread's time to issue one present draw, swap excluded, p95 over the recent draws. */
+    val drawCpuP95: Nanos? = null,
+    /** The longest poll of a pair's stats over the last second. Null when no stats were polled. */
+    val statsPollMax: Nanos? = null,
 )

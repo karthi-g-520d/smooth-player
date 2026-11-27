@@ -20,7 +20,13 @@ private const val NO_PTS = Long.MIN_VALUE
  * Only the GL thread may use this class, with a GLES 3.1 context current. [close] frees everything.
  */
 @GlThread
-internal class MotionFields(slotCount: Int, val columns: Int, val rows: Int) : AutoCloseable {
+internal class MotionFields(
+    slotCount: Int,
+    val columns: Int,
+    val rows: Int,
+    /** Gets the wall time, in nanoseconds, of every fence poll that was not answered from the stored flag. */
+    private val onPoll: (Long) -> Unit = {},
+) : AutoCloseable {
     private val textures = IntArray(slotCount)
     private val buffers = IntArray(slotCount)
     private val fences = LongArray(slotCount)
@@ -94,10 +100,14 @@ internal class MotionFields(slotCount: Int, val columns: Int, val rows: Int) : A
         if (prevPts[slot] == NO_PTS) return false
         val fence = fences[slot]
         if (fence == NO_FENCE) return false
+        val startNs = System.nanoTime()
         val status = GLES30.glClientWaitSync(fence, 0, 0L)
-        if (status != GLES30.GL_ALREADY_SIGNALED && status != GLES30.GL_CONDITION_SATISFIED) return false
-        deleteFence(slot)
-        ready[slot] = readStats(slot)
+        if (status == GLES30.GL_ALREADY_SIGNALED || status == GLES30.GL_CONDITION_SATISFIED) {
+            deleteFence(slot)
+            ready[slot] = readStats(slot)
+        }
+        // Measured because a driver may stall the GL thread here, which would cost refreshes.
+        onPoll(System.nanoTime() - startNs)
         return ready[slot]
     }
 

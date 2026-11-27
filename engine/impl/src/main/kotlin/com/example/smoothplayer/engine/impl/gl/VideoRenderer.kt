@@ -615,6 +615,7 @@ internal class VideoRenderer(
                 frames.slotCount,
                 GpuMotionSearch.columnsFor(frames.fineWidth),
                 GpuMotionSearch.rowsFor(frames.fineHeight),
+                telemetry::onStatsPoll,
             )
         }
         governor.reset()
@@ -646,10 +647,12 @@ internal class VideoRenderer(
 
         val timers = gpuTimers
         val view = debugView
+        val drawStartNs = System.nanoTime()
         if (!EMPTY_PRESENT_ENABLED) trace(TraceNames.GL_DRAW) {
             val draw = { drawPicture(frames, pick, rotation, view) }
             if (timers != null) timers.time(draw, onPresentGpu) else draw()
         }
+        telemetry.onDrawCpu(System.nanoTime() - drawStartNs)
 
         trace(TraceNames.GL_SWAP) { eglCore.swapBuffers(target, presentNs) }
         runPendingMotion()

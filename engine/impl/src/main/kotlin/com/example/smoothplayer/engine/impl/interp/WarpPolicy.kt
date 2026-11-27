@@ -56,10 +56,12 @@ internal data class WarpPolicyConfig(
     /** A histogram change this large is a cut on its own, even where the search found something to match. */
     val cutHistogramAlone: Float = 1.0f,
     /**
-     * Almost no textured block matching is a cut too, even between two shots with the same tones. Motion far beyond
-     * the search's reach looks the same, and holding a frame there is no worse than blending it.
+     * Almost no textured block matching, with at least some change in tones, is a cut too. The histogram floor keeps
+     * fast motion beyond the search's reach (same scene, same tones) from counting: the first phone run on a racing
+     * clip with no cuts found 4. A cut between two shots of the same tones then falls to the per-pixel confidence.
      */
     val cutLowConfidenceAlone: Float = 0.8f,
+    val cutLowConfidenceAloneHistogram: Float = 0.25f,
     /** The plan's "over ~40% low-confidence blocks: blend". */
     val lowConfidenceEnter: Float = 0.40f,
     val lowConfidenceExit: Float = 0.30f,
@@ -84,7 +86,8 @@ internal data class WarpPolicyConfig(
 /** True when the pair straddles a scene cut, so it should not be interpolated at all. */
 internal fun isSceneCut(stats: PairStats, config: WarpPolicyConfig = WarpPolicyConfig()): Boolean =
     stats.histogramDistance >= config.cutHistogramAlone ||
-        stats.lowConfidenceFraction >= config.cutLowConfidenceAlone ||
+        (stats.lowConfidenceFraction >= config.cutLowConfidenceAlone &&
+            stats.histogramDistance >= config.cutLowConfidenceAloneHistogram) ||
         (stats.histogramDistance >= config.cutHistogramDistance && stats.lowConfidenceFraction >= config.cutLowConfidence)
 
 /**

@@ -55,10 +55,17 @@ class WarpPolicyTest {
     }
 
     @Test
-    fun `a cut between two shots with the same tones is still a cut, because nothing matches`() {
+    fun `nothing matching with the same tones is not a cut, so fast motion beyond the search is not held`() {
+        // Measured: low-confidence 0.95, histogram distance 0.12. It falls to the per-pixel confidence instead.
         val stats = statsOf(plane { x, y -> texture(x, y) }, plane { x, y -> texture(x + OTHER_SHOT, y + OTHER_SHOT) })
         assertTrue("low confidence ${stats.lowConfidenceFraction}", stats.lowConfidenceFraction > 0.8f)
-        assertTrue(isSceneCut(stats))
+        assertFalse(isSceneCut(stats))
+    }
+
+    @Test
+    fun `nothing matching with some change in tones is a cut`() {
+        assertTrue(isSceneCut(PairStats(lowConfidenceFraction = 0.9f, histogramDistance = 0.3f)))
+        assertFalse(isSceneCut(PairStats(lowConfidenceFraction = 0.9f, histogramDistance = 0.2f)))
     }
 
     @Test

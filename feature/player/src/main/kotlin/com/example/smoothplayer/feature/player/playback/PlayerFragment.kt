@@ -199,7 +199,12 @@ public class PlayerFragment(
             thermalHeadroom?.let { getString(R.string.player_stats_thermal, it) } ?: notAvailable(),
             cadenceText(),
         )
-        val withWarp = warpText()?.let { "$text\n$it" } ?: text
+        val cpu = getString(
+            R.string.player_stats_cpu,
+            drawCpuP95?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+            statsPollMax?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+        )
+        val withWarp = warpText()?.let { "$text\n$cpu\n$it" } ?: "$text\n$cpu"
         return logPath?.let { "$withWarp\n${getString(R.string.player_log_saved, it)}" } ?: withWarp
     }
 
