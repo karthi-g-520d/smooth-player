@@ -41,6 +41,11 @@ private const val PAN_SOURCE_PX = 4
 /** The plan's bar is 0.5 px at 1/4 resolution, which is 2 source pixels. */
 private const val PLAN_BAR_SOURCE_PX = PLAN_BAR_PX * 4
 private const val SOURCE_CELL = CELL * LUMA_DIVISOR_1080P
+/** The 1080p pan's median error with the V fit is about 0.24 source px; this catches a return of the 0.5 px bias. */
+private const val V_FIT_MEDIAN_SOURCE_PX = 0.35
+private const val V_SLOPE = 1000f
+private const val V_FLOOR = 200f
+private const val V_FIT_TOLERANCE = 0.002f
 
 /** [texture] at source scale: the same lattice, [LUMA_DIVISOR_1080P] times larger. */
 private fun sourceTexture(x: Int, y: Int): Int {
@@ -161,7 +166,7 @@ class MotionSearchTest {
         val field = estimateMotion(prev, next, MotionSearchConfig(blockSize = BLOCK))
 
         // Integer search ties at 0 and 1, so the split between dx and subX varies; the total must not.
-        // Measured with this code: median error 0.000 px, worst 0.011 px.
+        // Measured with this code: median error 0.003 px, worst 0.008 px.
         val errors = mutableListOf<Double>()
         for (by in 0 until field.rows) {
             for (bx in 0 until field.columns) {
@@ -195,8 +200,26 @@ class MotionSearchTest {
             }
         }
         val sorted = errors.sorted()
-        // Measured with this code: median 0.50, p90 0.63, worst 0.73 source px. The bar is 2.
+        // Measured with this code: median 0.24, p90 0.64, worst 0.74 source px. The bar is 2. The parabola fit this
+        // replaced gave a median of 0.50, because it pulled every vector towards the nearest whole luma pixel.
         assertTrue("median error ${sorted[sorted.size / 2]} source px", sorted[sorted.size / 2] < PLAN_BAR_SOURCE_PX)
+        assertTrue("median error ${sorted[sorted.size / 2]} source px", sorted[sorted.size / 2] < V_FIT_MEDIAN_SOURCE_PX)
+    }
+
+    @Test
+    fun `the V fit returns the exact offset of a V-shaped SAD`() {
+        // SAD(k) = SLOPE * |k - offset| + FLOOR around the best whole vector k = 0.
+        for (offset in listOf(-0.45f, -0.3f, -0.1f, 0f, 0.2f, 0.33f, 0.49f)) {
+            fun sad(k: Int) = Math.round(V_SLOPE * abs(k - offset) + V_FLOOR)
+            assertEquals("offset $offset", offset, subpixelOffset(sad(-1), sad(0), sad(1)), V_FIT_TOLERANCE)
+        }
+    }
+
+    @Test
+    fun `the V fit leaves a sample set that is not a minimum unmoved`() {
+        assertEquals(0f, subpixelOffset(10, 20, 30), 0f)
+        assertEquals(0f, subpixelOffset(50, 50, 50), 0f)
+        assertEquals(0f, subpixelOffset(30, 0, 50), 0f)
     }
 
     @Test

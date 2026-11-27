@@ -21,16 +21,19 @@ internal object PlayerReducer {
         PlayerEvent.FullscreenToggled -> state.copy(fullscreen = !state.fullscreen)
     }
 
+    /** Duplicate, then blend, then motion-compensated, then back to duplicate. */
     private fun InterpolationMode.other(): InterpolationMode = when (this) {
         InterpolationMode.Duplicate -> InterpolationMode.Blend
-        InterpolationMode.Blend -> InterpolationMode.Duplicate
+        InterpolationMode.Blend -> InterpolationMode.MotionCompensated
+        InterpolationMode.MotionCompensated -> InterpolationMode.Duplicate
     }
 
-    /** Normal picture, then motion vectors, then match error, then back to normal. */
+    /** Normal picture, then motion vectors, match error and warp confidence, then back to normal. */
     private fun DebugView.next(): DebugView = when (this) {
         DebugView.Off -> DebugView.MotionVectors
         DebugView.MotionVectors -> DebugView.MatchError
-        DebugView.MatchError -> DebugView.Off
+        DebugView.MatchError -> DebugView.WarpConfidence
+        DebugView.WarpConfidence -> DebugView.Off
     }
 
     private fun PlayerUiState.fromEngine(engineState: EngineState): PlayerUiState = when (engineState) {

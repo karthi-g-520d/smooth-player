@@ -52,6 +52,32 @@ internal class EglCore private constructor(
         check(EGL14.eglSwapBuffers(display, target)) { eglFailure("eglSwapBuffers") }
     }
 
+    /**
+     * Creates a second context that shares this one's objects (buffers, textures, sync objects), with its own 1x1
+     * pbuffer, for a worker thread. Close it before this core.
+     */
+    fun createSharedContext(): SharedEglContext {
+        val shared = EGL14.eglCreateContext(
+            display,
+            config,
+            context,
+            intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, GLES_CLIENT_VERSION, EGL14.EGL_NONE),
+            0,
+        )
+        check(shared != EGL14.EGL_NO_CONTEXT) { eglFailure("eglCreateContext (shared)") }
+        val surface = EGL14.eglCreatePbufferSurface(
+            display,
+            config,
+            intArrayOf(EGL14.EGL_WIDTH, PBUFFER_SIZE, EGL14.EGL_HEIGHT, PBUFFER_SIZE, EGL14.EGL_NONE),
+            0,
+        )
+        if (surface == EGL14.EGL_NO_SURFACE) {
+            EGL14.eglDestroyContext(display, shared)
+            error(eglFailure("eglCreatePbufferSurface (shared)"))
+        }
+        return SharedEglContext(display, shared, surface)
+    }
+
     override fun close() {
         EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
         EGL14.eglDestroySurface(display, pbuffer)
@@ -114,5 +140,29 @@ internal class EglCore private constructor(
 
         private fun eglFailure(call: String): String =
             "$call failed (EGL error 0x${EGL14.eglGetError().toString(16)})"
+    }
+}
+
+/**
+ * A context in an [EglCore]'s share group, for one worker thread. That thread calls [makeCurrent] once and [close] when
+ * it is done; the display stays owned by the [EglCore].
+ */
+internal class SharedEglContext(
+    private val display: EGLDisplay,
+    private val context: EGLContext,
+    private val surface: EGLSurface,
+) : AutoCloseable {
+    fun makeCurrent() {
+        check(EGL14.eglMakeCurrent(display, surface, surface, context)) {
+            "eglMakeCurrent (shared) failed (EGL error 0x${EGL14.eglGetError().toString(16)})"
+        }
+    }
+
+    /** Releases the context from the calling thread and destroys it. */
+    override fun close() {
+        EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+        EGL14.eglDestroySurface(display, surface)
+        EGL14.eglDestroyContext(display, context)
+        EGL14.eglReleaseThread()
     }
 }

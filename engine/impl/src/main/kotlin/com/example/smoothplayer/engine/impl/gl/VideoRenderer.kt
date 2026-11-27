@@ -13,9 +13,13 @@ import android.view.Surface
 import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
+import com.example.smoothplayer.engine.api.model.Nanos
 import com.example.smoothplayer.engine.api.model.VideoInfo
+import com.example.smoothplayer.engine.api.model.WarpFallback
 import com.example.smoothplayer.engine.impl.clock.MasterClock
 import com.example.smoothplayer.engine.impl.interp.GpuMotionSearch
+import com.example.smoothplayer.engine.impl.interp.MotionFields
+import com.example.smoothplayer.engine.impl.interp.WarpGovernor
 import com.example.smoothplayer.engine.impl.pacer.VsyncPacer
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
 import com.example.smoothplayer.engine.impl.telemetry.TraceNames
@@ -51,6 +55,18 @@ private const val UNIFORM_BLOCK_LUMA = 8
 private const val UNIFORM_MAX_VECTOR = 9
 private const val UNIFORM_MAX_RESIDUAL = 10
 private const val UNIFORM_VIEW = 11
+// The warp's fragment uniforms, at 6 to 10 in its own program.
+private const val UNIFORM_WARP_T = 6
+private const val UNIFORM_LUMA_TO_UV = 7
+private const val UNIFORM_FIELD_SCALE = 8
+private const val UNIFORM_WARP_WEIGHT = 9
+private const val UNIFORM_WARP_DEBUG_VIEW = 10
+private const val WARP_VIEW_PICTURE = 0
+private const val WARP_VIEW_CONFIDENCE = 1
+private const val FIELD_TEXTURE_UNIT = 2
+private const val VERDICT_TEXTURE_UNIT = 3
+/** The phase the confidence view uses when only one frame is on screen. */
+private const val HALF_PHASE = 0.5f
 private const val MOTION_VIEW_VECTORS = 1
 private const val MOTION_VIEW_MATCH_ERROR = 2
 /** The residual the match-error view shows as fully red: a best-match SAD as large as the block's own detail. */
@@ -62,12 +78,21 @@ private const val LUMA_FINE_SHADER_ASSET = "shaders/luma_downsample.frag"
 private const val LUMA_COARSE_SHADER_ASSET = "shaders/luma_half.frag"
 private const val BLEND_SHADER_ASSET = "shaders/blend.frag"
 private const val MOTION_VIEW_SHADER_ASSET = "shaders/motion_view.frag"
+private const val WARP_SHADER_ASSET = "shaders/warp.frag"
 private const val TEXTURE_MATRIX_SIZE = 16
 private const val ROTATION_MATRIX_SIZE = 4
 private const val QUAD_HALF_EXTENT = 1f
 private const val NANOS_PER_MICRO = 1_000L
 private const val TARGET_REFRESH_HZ = 60f
 private const val NO_PENDING_SLOT = -1
+private const val NO_SLOT = -1
+
+/** How one refresh of [InterpolationMode.MotionCompensated] is drawn. */
+private const val DRAW_PLAIN = 0 // one frame, or the phase is on a frame: nothing to interpolate
+private const val DRAW_WARP = 1
+private const val DRAW_BLEND = 2 // no field for this pair
+private const val DRAW_HOLD = 3 // the heat or GPU fallback: show the earlier frame
+private const val DRAW_LOW_CONFIDENCE = 4 // too little has matched lately: blend, but still hold at a scene cut
 
 /**
  * Diagnostic switch for the GPU present timer. Turning it off removes the per-draw timer query and its
@@ -83,7 +108,7 @@ internal const val LUMA_PASSES_ENABLED = true
 
 /**
  * Switch for motion estimation. When on, each arriving frame's motion luma is matched against the frame
- * before it on the GPU. Nothing shows the vectors yet. Needs [LUMA_PASSES_ENABLED].
+ * before it on the GPU. The motion-compensated mode and the motion views need it. Needs [LUMA_PASSES_ENABLED].
  *
  * Off by default until GpuMotionSearchBenchmark shows the search within the Step 6 bar on the target devices. The
  * first, raster-order search took 26 ms per 1080p pair on the vivo V2334 and dropped playback cadence to about 70%.
@@ -135,9 +160,12 @@ private val IDENTITY_4 = floatArrayOf(
  *
  * Each arriving frame is copied out of the OES texture into a [FrameRing] slot, with its motion luma at two levels
  * (see [FrameRing]). Its motion from the frame before is estimated on that luma straight after the next swap, so the
- * search never sits in the GPU queue ahead of a present (see [runPendingMotion]).
+ * search never sits in the GPU queue ahead of a present (see [runPendingMotion]). Each slot keeps its own field and
+ * pair stats in [MotionFields].
  * On every vsync the window is drawn from the ring: the newest frame in [InterpolationMode.Duplicate], or the two
- * frames around the screen's content time in [InterpolationMode.Blend].
+ * frames around the screen's content time in [InterpolationMode.Blend] and [InterpolationMode.MotionCompensated]. The
+ * last warps the two frames along the pair's motion where it is trusted, and otherwise blends or holds (see
+ * [decideWarp] and warp.frag).
  *
  * Every GL call runs on the FI-GL thread. The public methods only post work to it, except
  * [awaitFrameSurface], which the decoder thread calls and which blocks that thread only.
@@ -166,8 +194,14 @@ internal class VideoRenderer(
     /** Runs on the GL thread after each arriving frame is in the ring. The decoder releases the next frame from it. */
     @Volatile var onFrameCopied: (() -> Unit)? = null
 
-    /** True while the blend mode is chosen. Read from the decoder thread, which releases frames one ahead when it is. */
-    val isBlending: Boolean get() = mode == InterpolationMode.Blend
+    /**
+     * True while the mode draws between two frames. Read from the decoder thread, which releases frames one ahead when
+     * it is.
+     */
+    val usesFramePairs: Boolean get() = mode != InterpolationMode.Duplicate
+
+    // Posted by onSeek, read on the GL thread before the next draw.
+    @Volatile private var seekPending = false
 
     // GL-thread-only state.
     private var core: EglCore? = null
@@ -181,12 +215,20 @@ internal class VideoRenderer(
     private var lumaCoarseProgram = 0
     private var blendProgram = 0
     private var motionViewProgram = 0
+    private var warpProgram = 0
     private var vertexArray = 0
     private var vertexBuffer = 0
     private var ring: FrameRing? = null
     private var gpuTimers: GpuTimerRing? = null
     private var motionSearch: GpuMotionSearch? = null
     private var motionTimers: GpuTimerRing? = null
+    // One motion field per ring slot, so every pair in the ring keeps its own vectors. Null without motion search.
+    private var fields: MotionFields? = null
+    private val governor = WarpGovernor()
+    private val onPresentGpu: (Nanos) -> Unit = { duration ->
+        telemetry.onPresentGpu(duration)
+        governor.onPresentGpu(duration.value, System.nanoTime())
+    }
     // The newest ring slot whose motion is still to be estimated, and its pts so a recycled slot is not searched.
     private var pendingMotionSlot = NO_PENDING_SLOT
     private var pendingMotionPtsUs = EMPTY_SLOT_PTS_US
@@ -223,6 +265,14 @@ internal class VideoRenderer(
     /** Chooses how the next refreshes pick their frames. Takes effect at the next vsync. */
     fun setInterpolationMode(newMode: InterpolationMode) {
         mode = newMode
+    }
+
+    /**
+     * Forgets the motion fields and the warp's fallback state, because the frames on either side of a seek are not a
+     * pair. Takes effect before the next draw.
+     */
+    fun onSeek() {
+        seekPending = true
     }
 
     /**
@@ -290,8 +340,11 @@ internal class VideoRenderer(
         if (windowSurface == null) return
         val contentUs = pacer?.displayContentUsOrNull(presentNs)
         val pick = chooseFrames(contentUs) ?: return
+        governor.onThermal(telemetry.thermalHeadroom, System.nanoTime())
         present(presentNs, pick)
+        // A held frame (scene cut, heat or GPU fallback) is a draw of A, the same as Duplicate's.
         telemetry.onVsyncDraw(checkNotNull(ring).pts(pick.a), periodNs, contentUs)
+        telemetry.onWarpFallback(if (mode == InterpolationMode.MotionCompensated) governor.fallback else null)
     }
 
     /**
@@ -302,7 +355,7 @@ internal class VideoRenderer(
     @GlThread
     private fun chooseFrames(contentUs: Long?): BlendPick? {
         val frames = ring ?: return null
-        if (isBlending && contentUs != null) {
+        if (usesFramePairs && contentUs != null) {
             pickBlendPair(frames.ptsArray(), contentUs, MAX_BLEND_GAP_US)?.let { return it }
         }
         return latestPick()
@@ -370,6 +423,7 @@ internal class VideoRenderer(
             lumaCoarseProgram = linkProgram(vertexSource, loadAsset(LUMA_COARSE_SHADER_ASSET))
             blendProgram = linkProgram(vertexSource, loadAsset(BLEND_SHADER_ASSET))
             motionViewProgram = linkProgram(vertexSource, loadAsset(MOTION_VIEW_SHADER_ASSET))
+            warpProgram = linkProgram(vertexSource, loadAsset(WARP_SHADER_ASSET))
             createVertexState()
             gpuTimers = if (GPU_TIMERS_ENABLED) GpuTimerRing.createIfSupported() else null
             motionSearch = if (MOTION_SEARCH_ENABLED && LUMA_PASSES_ENABLED) createMotionSearch() else null
@@ -457,6 +511,7 @@ internal class VideoRenderer(
         if (width <= 0 || height <= 0) return
         val frames = ringFor(width, height)
         val slot = frames.acquire(ptsUs)
+        fields?.invalidate(slot)
 
         trace(TraceNames.GL_COPY) {
             frames.attach(frames.frameTexture(slot), width, height)
@@ -503,6 +558,9 @@ internal class VideoRenderer(
         pendingMotionSlot = NO_PENDING_SLOT
         val frames = ring ?: return
         if (frames.pts(slot) != pendingMotionPtsUs) return
+        // While the heat or GPU fallback holds frames, nothing reads the fields, so the search is skipped to spare the
+        // GPU. The motion views still need it.
+        if (mode == InterpolationMode.MotionCompensated && governor.holdsFrames && debugView == DebugView.Off) return
         if (estimateMotion(frames, slot)) GLES30.glFlush()
     }
 
@@ -514,8 +572,12 @@ internal class VideoRenderer(
     @GlThread
     private fun estimateMotion(frames: FrameRing, slot: Int): Boolean {
         val search = motionSearch ?: return false
+        val slotFields = fields ?: return false
         val previous = frames.previous(slot)
-        if (frames.pts(previous) == EMPTY_SLOT_PTS_US) return false
+        val prevPts = frames.pts(previous)
+        val nextPts = frames.pts(slot)
+        // Not a pair: the first frame, or the two sides of a seek.
+        if (prevPts == EMPTY_SLOT_PTS_US || nextPts <= prevPts || nextPts - prevPts > MAX_BLEND_GAP_US) return false
         trace(TraceNames.INTERP_ME) {
             val pass = {
                 search.run(
@@ -525,10 +587,14 @@ internal class VideoRenderer(
                     frames.lumaCoarseTexture(slot),
                     frames.fineWidth,
                     frames.fineHeight,
+                    fieldTexture = slotFields.texture(slot),
+                    statsBuffer = slotFields.statsBuffer(slot),
+                    verdictTexture = slotFields.verdictTexture(slot),
                 )
             }
             val timers = motionTimers
             if (timers != null) timers.time(pass, telemetry::onMotionGpu) else pass()
+            slotFields.markSearched(slot, prevPts, nextPts)
         }
         return true
     }
@@ -539,9 +605,36 @@ internal class VideoRenderer(
         val current = ring
         if (current != null && current.width == width && current.height == height) return current
         current?.close()
+        fields?.close()
+        fields = null
         pendingMotionSlot = NO_PENDING_SLOT
-        return FrameRing(width, height).also { ring = it }
+        val frames = FrameRing(width, height)
+        ring = frames
+        if (motionSearch != null) {
+            fields = MotionFields(
+                frames.slotCount,
+                GpuMotionSearch.columnsFor(frames.fineWidth),
+                GpuMotionSearch.rowsFor(frames.fineHeight),
+                sharedContextOrNull(),
+                telemetry::onStatsPoll,
+            )
+        }
+        governor.reset()
+        return frames
     }
+
+    /**
+     * A context for the stats reader, or null when the driver refuses a second one. The warp then still runs, and
+     * still holds frames at scene cuts, but the low-confidence fallback and the cut count go quiet.
+     */
+    @GlThread
+    private fun sharedContextOrNull(): SharedEglContext? =
+        try {
+            core?.createSharedContext()
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "no shared context, pair stats off", e)
+            null
+        }
 
     /**
      * Draws the chosen frames to the window. Viewport, clear and framebuffer are set here, so no state from a copy
@@ -552,6 +645,7 @@ internal class VideoRenderer(
         val eglCore = core ?: return
         val target = windowSurface ?: return
         val frames = ring ?: return
+        if (seekPending) forgetPairs()
         eglCore.makeCurrent(target)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
 
@@ -566,41 +660,139 @@ internal class VideoRenderer(
 
         val timers = gpuTimers
         val view = debugView
+        val drawStartNs = System.nanoTime()
         if (!EMPTY_PRESENT_ENABLED) trace(TraceNames.GL_DRAW) {
             val draw = { drawPicture(frames, pick, rotation, view) }
-            if (timers != null) timers.time(draw, telemetry::onPresentGpu) else draw()
+            if (timers != null) timers.time(draw, onPresentGpu) else draw()
         }
+        telemetry.onDrawCpu(System.nanoTime() - drawStartNs)
 
         trace(TraceNames.GL_SWAP) { eglCore.swapBuffers(target, presentNs) }
         runPendingMotion()
+        accountPairs()
     }
 
-    /** The normal picture, or the chosen motion view when there is a motion field to show. */
+    /**
+     * Feeds the stats the worker has read since the last call to the low-confidence fallback and the overlay. Never
+     * waits. A cut is one pair, not a trend, so it does not move the fallback. Pairs read in another mode are
+     * dropped, so Blend playback counts no cuts.
+     */
+    @GlThread
+    private fun accountPairs() {
+        val slotFields = fields ?: return
+        while (true) {
+            val slot = slotFields.takeReadSlot()
+            if (slot < 0) return
+            if (mode != InterpolationMode.MotionCompensated) continue
+            val stats = slotFields.stats(slot)
+            if (slotFields.isCut(slot)) {
+                telemetry.onSceneCut(stats.lowConfidenceFraction, stats.histogramDistance)
+            } else {
+                governor.onPair(stats)
+            }
+        }
+    }
+
+    /** Forgets every field and the fallback state, after a seek. */
+    @GlThread
+    private fun forgetPairs() {
+        seekPending = false
+        fields?.invalidateAll()
+        pendingMotionSlot = NO_PENDING_SLOT
+        governor.reset()
+    }
+
+    /** The normal picture in the chosen mode, or the chosen diagnostic view. */
     @GlThread
     private fun drawPicture(frames: FrameRing, pick: BlendPick, rotation: Int, view: DebugView) {
-        val search = motionSearch
-        if (search == null || search.motionTexture == 0) {
-            drawBlend(frames, pick, rotation)
+        when (view) {
+            DebugView.MotionVectors, DebugView.MatchError -> {
+                val search = motionSearch
+                val slot = fieldSlotForView(frames, pick)
+                if (search != null && slot != NO_SLOT) {
+                    val motionView = if (view == DebugView.MotionVectors) MOTION_VIEW_VECTORS else MOTION_VIEW_MATCH_ERROR
+                    drawMotionView(frames, search, slot, pick, rotation, motionView)
+                    return
+                }
+            }
+            DebugView.WarpConfidence -> if (fields != null) {
+                drawConfidenceView(frames, pick, rotation)
+                return
+            }
+            DebugView.Off -> Unit
+        }
+        if (mode != InterpolationMode.MotionCompensated) {
+            drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.b), pick.t, rotation)
             return
         }
-        when (view) {
-            DebugView.Off -> drawBlend(frames, pick, rotation)
-            DebugView.MotionVectors -> drawMotionView(frames, search, pick, rotation, MOTION_VIEW_VECTORS)
-            DebugView.MatchError -> drawMotionView(frames, search, pick, rotation, MOTION_VIEW_MATCH_ERROR)
+        val decision = decideWarp(frames, pick)
+        val inBetween = pick.a != pick.b && pick.t > 0f
+        if (inBetween) telemetry.onInBetweenDraw(warped = decision == DRAW_WARP)
+        when {
+            decision == DRAW_WARP && inBetween ->
+                drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 1f, view = WARP_VIEW_PICTURE)
+            // Still through the warp, at weight 0, so a scene cut holds its frame instead of blending two shots.
+            decision == DRAW_LOW_CONFIDENCE && inBetween ->
+                drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 0f, view = WARP_VIEW_PICTURE)
+            decision == DRAW_HOLD -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.a), 0f, rotation)
+            else -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.b), pick.t, rotation)
         }
     }
 
     /**
-     * The motion field over a grey copy of the newer frame of [pick]. The field is the newest searched pair, so it can
-     * be a frame ahead of or behind the pair on screen. That is close enough to judge the field by eye.
+     * How [pick] is drawn in the motion-compensated mode. The heat and GPU fallbacks come first, since they stop the
+     * search. Then the pair needs its own field; without one it blends, as Blend mode does. The search is queued
+     * before any draw of its pair, so the GPU runs it first, and the scene-cut verdict comes with it: warp.frag holds
+     * the earlier frame for a cut. Too many low-confidence pairs in a row blend. Nothing here waits for the CPU to
+     * read the pair's stats.
      */
     @GlThread
-    private fun drawMotionView(frames: FrameRing, search: GpuMotionSearch, pick: BlendPick, rotation: Int, view: Int) {
+    private fun decideWarp(frames: FrameRing, pick: BlendPick): Int {
+        if (pick.a == pick.b) return DRAW_PLAIN
+        if (governor.holdsFrames) return DRAW_HOLD
+        val slotFields = fields ?: return DRAW_BLEND
+        val slot = pick.b
+        val nextPts = frames.pts(slot)
+        if (!slotFields.holds(slot, frames.pts(pick.a), nextPts)) return DRAW_BLEND
+        return when (governor.fallback) {
+            WarpFallback.None -> DRAW_WARP
+            WarpFallback.LowConfidence -> DRAW_LOW_CONFIDENCE
+            WarpFallback.Thermal, WarpFallback.GpuBudget -> DRAW_HOLD
+        }
+    }
+
+    /**
+     * The slot whose field the motion views show: the pair on screen when its field exists, otherwise the newest
+     * searched pair. [NO_SLOT] when neither has one.
+     */
+    @GlThread
+    private fun fieldSlotForView(frames: FrameRing, pick: BlendPick): Int {
+        val slotFields = fields ?: return NO_SLOT
+        if (holdsOwnPair(slotFields, frames, pick.b)) return pick.b
+        val latest = frames.latest
+        return if (latest >= 0 && holdsOwnPair(slotFields, frames, latest)) latest else NO_SLOT
+    }
+
+    /** True when [slot]'s field is the motion from the frame before it in the ring to the frame in it. */
+    @GlThread
+    private fun holdsOwnPair(slotFields: MotionFields, frames: FrameRing, slot: Int): Boolean =
+        slotFields.holds(slot, frames.pts(frames.previous(slot)), frames.pts(slot))
+
+    /** The motion field of [slot]'s pair over a grey copy of the newer frame of [pick]. */
+    @GlThread
+    private fun drawMotionView(
+        frames: FrameRing,
+        search: GpuMotionSearch,
+        slot: Int,
+        pick: BlendPick,
+        rotation: Int,
+        view: Int,
+    ) {
         GLES30.glUseProgram(motionViewProgram)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.b))
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, search.motionTexture)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, checkNotNull(fields).texture(slot))
         GLES30.glUniform2f(UNIFORM_FRAME_SIZE, frames.width.toFloat(), frames.height.toFloat())
         GLES30.glUniform1f(UNIFORM_LUMA_PX, frames.motionLumaDivisor.toFloat())
         GLES30.glUniform1f(UNIFORM_BLOCK_LUMA, search.blockSize.toFloat())
@@ -612,14 +804,65 @@ internal class VideoRenderer(
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
     }
 
+    /**
+     * The warp's per-pixel confidence for the pair on screen, in any mode. When only one frame is on screen (Duplicate
+     * mode, or a refresh that lands on a frame), it shows the pair that ends at that frame, halfway. The whole-picture
+     * fallbacks (heat, GPU budget, low confidence) are left out, so the view always shows what the field can do; only a
+     * pair without a finished field, or a scene cut, shows all red.
+     */
     @GlThread
-    private fun drawBlend(frames: FrameRing, pick: BlendPick, rotation: Int) {
+    private fun drawConfidenceView(frames: FrameRing, pick: BlendPick, rotation: Int) {
+        val slotFields = checkNotNull(fields)
+        val paired = pick.a != pick.b
+        val b = pick.b
+        val a = if (paired) pick.a else frames.previous(b)
+        val t = if (paired) pick.t else HALF_PHASE
+        // A scene cut shows all red too: warp.frag reads the GPU's verdict.
+        val trusted = slotFields.holds(b, frames.pts(a), frames.pts(b))
+        drawWarp(frames, a, b, t, rotation, weight = if (trusted) 1f else 0f, view = WARP_VIEW_CONFIDENCE)
+    }
+
+    /**
+     * The motion-compensated frame at [pick]'s phase, from the field of its newer slot (see warp.frag). [weight] 0
+     * makes it the plain blend, which the confidence view uses to show a pair the warp does not draw.
+     */
+    @GlThread
+    private fun drawWarp(frames: FrameRing, a: Int, b: Int, t: Float, rotation: Int, weight: Float, view: Int) {
+        val slotFields = checkNotNull(fields)
+        val divisor = frames.motionLumaDivisor.toFloat()
+        val blockSource = divisor * GpuMotionSearch.BLOCK_SIDE
+        GLES30.glUseProgram(warpProgram)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(a))
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(b))
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + FIELD_TEXTURE_UNIT)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slotFields.texture(b))
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + VERDICT_TEXTURE_UNIT)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slotFields.verdictTexture(b))
+        GLES30.glUniform1f(UNIFORM_WARP_T, t)
+        GLES30.glUniform2f(UNIFORM_LUMA_TO_UV, divisor / frames.width, divisor / frames.height)
+        GLES30.glUniform2f(
+            UNIFORM_FIELD_SCALE,
+            frames.width / (blockSource * slotFields.columns),
+            frames.height / (blockSource * slotFields.rows),
+        )
+        GLES30.glUniform1f(UNIFORM_WARP_WEIGHT, weight)
+        GLES30.glUniform1i(UNIFORM_WARP_DEBUG_VIEW, view)
+        drawFullScreenQuad(rotation = clockwiseRotation(rotation, rotationMatrix), uvMatrix = IDENTITY_4)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+    }
+
+    /** [frameA] and [frameB] mixed at [t]. The same texture twice, or t = 0, shows one frame unchanged. */
+    @GlThread
+    private fun drawBlend(frameA: Int, frameB: Int, t: Float, rotation: Int) {
         GLES30.glUseProgram(blendProgram)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.a))
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frameA)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.b))
-        GLES30.glUniform1f(UNIFORM_T, pick.t)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frameB)
+        GLES30.glUniform1f(UNIFORM_T, t)
         GLES30.glUniform1i(UNIFORM_DEBUG_VIEW, BLEND_DEBUG_VIEW)
         drawFullScreenQuad(rotation = clockwiseRotation(rotation, rotationMatrix), uvMatrix = IDENTITY_4)
     }
@@ -657,11 +900,14 @@ internal class VideoRenderer(
         eglCore.makeCurrent()
         ring?.close()
         ring = null
+        fields?.close()
+        fields = null
         GLES30.glDeleteProgram(copyProgram)
         GLES30.glDeleteProgram(lumaFineProgram)
         GLES30.glDeleteProgram(lumaCoarseProgram)
         GLES30.glDeleteProgram(blendProgram)
         GLES30.glDeleteProgram(motionViewProgram)
+        GLES30.glDeleteProgram(warpProgram)
         GLES30.glDeleteBuffers(1, intArrayOf(vertexBuffer), 0)
         GLES30.glDeleteVertexArrays(1, intArrayOf(vertexArray), 0)
         GLES30.glDeleteTextures(1, intArrayOf(textureId), 0)

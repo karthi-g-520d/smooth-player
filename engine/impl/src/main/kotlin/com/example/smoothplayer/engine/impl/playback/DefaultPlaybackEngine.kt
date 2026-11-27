@@ -113,6 +113,7 @@ public class DefaultPlaybackEngine(
             _state.value = EngineState.Paused
         }
         wallClock?.reset(target)
+        renderer?.onSeek()
         audioDecoder?.seekTo(target)
         videoDecoder?.seekTo(target)
         _position.value = target
@@ -188,7 +189,7 @@ public class DefaultPlaybackEngine(
             trackFormat = opened.video.format,
             clock = clock,
             releaseTargetUs = { videoRenderer.releaseTargetUs() ?: clock.nowUs() },
-            blendsAhead = { videoRenderer.isBlending },
+            blendsAhead = { videoRenderer.usesFramePairs },
             telemetry = telemetry,
             outputSurfaceProvider = { videoRenderer.awaitFrameSurface() },
             onFrameShown = { _position.value = it },

@@ -20,6 +20,7 @@ import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
+import com.example.smoothplayer.engine.api.model.WarpFallback
 import com.example.smoothplayer.feature.player.R
 import com.example.smoothplayer.feature.player.databinding.FragmentPlayerBinding
 import kotlinx.coroutines.launch
@@ -117,10 +118,10 @@ public class PlayerFragment(
         renderSeekPosition(state.position)
         renderStats(state)
         modeButton.setText(
-            if (state.interpolation == InterpolationMode.Blend) {
-                R.string.player_mode_blend
-            } else {
-                R.string.player_mode_duplicate
+            when (state.interpolation) {
+                InterpolationMode.Duplicate -> R.string.player_mode_duplicate
+                InterpolationMode.Blend -> R.string.player_mode_blend
+                InterpolationMode.MotionCompensated -> R.string.player_mode_motion
             },
         )
         viewButton.setText(
@@ -128,6 +129,7 @@ public class PlayerFragment(
                 DebugView.Off -> R.string.player_view_normal
                 DebugView.MotionVectors -> R.string.player_view_motion
                 DebugView.MatchError -> R.string.player_view_match_error
+                DebugView.WarpConfidence -> R.string.player_view_warp_confidence
             },
         )
         renderFullscreen(state.fullscreen)
@@ -197,7 +199,31 @@ public class PlayerFragment(
             thermalHeadroom?.let { getString(R.string.player_stats_thermal, it) } ?: notAvailable(),
             cadenceText(),
         )
-        return logPath?.let { "$text\n${getString(R.string.player_log_saved, it)}" } ?: text
+        val cpu = getString(
+            R.string.player_stats_cpu,
+            drawCpuP95?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+            statsPollMax?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
+        )
+        val withWarp = warpText()?.let { "$text\n$cpu\n$it" } ?: "$text\n$cpu"
+        return logPath?.let { "$withWarp\n${getString(R.string.player_log_saved, it)}" } ?: withWarp
+    }
+
+    /** The warp's fallback, share of warped in-betweens and scene cuts. Null outside the motion-compensated mode. */
+    private fun PlaybackStats.warpText(): String? {
+        val fallback = warpFallback ?: return null
+        val state = getString(
+            when (fallback) {
+                WarpFallback.None -> R.string.player_warp_on
+                WarpFallback.LowConfidence -> R.string.player_warp_low_confidence
+                WarpFallback.Thermal -> R.string.player_warp_thermal
+                WarpFallback.GpuBudget -> R.string.player_warp_gpu_budget
+            },
+        )
+        val warped = warpPercent?.let { getString(R.string.player_stats_percent, it) } ?: notAvailable()
+        val line = getString(R.string.player_stats_warp, state, warped, sceneCuts)
+        val unmatched = lastCutLowConfidence ?: return line
+        val toneChange = lastCutHistogram ?: return line
+        return "$line\n${getString(R.string.player_stats_last_cut, unmatched, toneChange)}"
     }
 
     /** The current one-second cadence, with the whole-playback average beside it once there is one. */

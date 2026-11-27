@@ -10,6 +10,7 @@ import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.Nanos
 import com.example.smoothplayer.engine.api.model.PlaybackStats
+import com.example.smoothplayer.engine.api.model.WarpFallback
 import java.io.File
 
 private const val TAG = "FI/Telemetry"
@@ -53,7 +54,15 @@ internal class FrameTelemetry(
     private var totalRendered = 0L
     private var totalDropped = 0L
     private var lastDrift: Micros? = null
-    private var lastThermal: Float? = null
+    @Volatile private var lastThermal: Float? = null
+
+    // The warp, from the GL thread: in-between refreshes drawn and how many were warped, scene cuts, the fallback.
+    private var windowInBetween = 0L
+    private var windowWarped = 0L
+    private var totalSceneCuts = 0L
+    private var lastCutLowConfidence: Float? = null
+    private var lastCutHistogram: Float? = null
+    private var warpFallback: WarpFallback? = null
 
     private var windowStartNs: Long? = null
     private var windowRendered = 0L
@@ -78,6 +87,8 @@ internal class FrameTelemetry(
 
     private val presentGpu = GpuSamples()
     private val motionGpu = GpuSamples()
+    private val drawCpu = GpuSamples()
+    private var windowStatsPollMaxNs = 0L
 
     /** Clears the per-playback counters. A log file that is already open keeps writing. */
     fun reset(masterIsAudio: Boolean) {
@@ -99,8 +110,17 @@ internal class FrameTelemetry(
             windowUnknownDraws = 0L
             totalRuns = 0L
             totalExactRuns = 0L
+            windowInBetween = 0L
+            windowWarped = 0L
+            totalSceneCuts = 0L
+            lastCutLowConfidence = null
+            lastCutHistogram = null
+            warpFallback = null
         }
     }
+
+    /** The thermal headroom read at the last stats publish, about once a second. Null when the device has none. */
+    val thermalHeadroom: Float? get() = lastThermal
 
     /**
      * Records a frame that left the decoder. [rendered] is false for a frame that was dropped.
@@ -140,6 +160,9 @@ internal class FrameTelemetry(
                 windowLastPtsUs = 0L
                 windowRuns = 0L
                 windowExactRuns = 0L
+                windowInBetween = 0L
+                windowWarped = 0L
+                windowStatsPollMaxNs = 0L
             }
         }
     }
@@ -178,6 +201,44 @@ internal class FrameTelemetry(
             lastDrawnPtsUs = ptsUs
             drawRunLength = 1
         }
+    }
+
+    /**
+     * Records one in-between refresh of the motion-compensated mode: [warped] when the warp drew it, false when a
+     * fallback did. Called on the GL thread.
+     */
+    fun onInBetweenDraw(warped: Boolean) {
+        synchronized(lock) {
+            windowInBetween++
+            if (warped) windowWarped++
+        }
+    }
+
+    /**
+     * Records a frame pair held across a scene cut, with the stats that made it one, so the overlay can show what the
+     * cut rule saw. Called on the GL thread, once per pair.
+     */
+    fun onSceneCut(lowConfidence: Float, histogramDistance: Float) {
+        synchronized(lock) {
+            totalSceneCuts++
+            lastCutLowConfidence = lowConfidence
+            lastCutHistogram = histogramDistance
+        }
+    }
+
+    /** Records the warp's current fallback, or null outside the motion-compensated mode. Called on the GL thread. */
+    fun onWarpFallback(fallback: WarpFallback?) {
+        synchronized(lock) { warpFallback = fallback }
+    }
+
+    /** Records the GL thread's wall time to issue one present draw, swap excluded. Called on the GL thread. */
+    fun onDrawCpu(durationNs: Long) {
+        synchronized(lock) { drawCpu.add(durationNs) }
+    }
+
+    /** Records the wall time of one poll of a pair's stats fence (and read, when it had signalled). GL thread. */
+    fun onStatsPoll(durationNs: Long) {
+        synchronized(lock) { if (durationNs > windowStatsPollMaxNs) windowStatsPollMaxNs = durationNs }
     }
 
     /** Records one GPU time for the present pass. Called on the GL thread. */
@@ -227,7 +288,8 @@ internal class FrameTelemetry(
         val elapsedSeconds = (nowNs - (windowStartNs ?: nowNs)).coerceAtLeast(1L) / NANOS_PER_SECOND
         val gpu = presentGpu.sorted()
         val motion = motionGpu.sorted()
-        lastThermal = thermalHeadroom()
+        val draw = drawCpu.sorted()
+        lastThermal = readThermalHeadroom()
         return PlaybackStats(
             displayFps = (windowRendered / elapsedSeconds).toFloat(),
             contentFps = contentFps(windowRendered, windowFirstPtsUs, windowLastPtsUs),
@@ -243,6 +305,13 @@ internal class FrameTelemetry(
             cadenceExactPercent = if (windowRuns > 0L) windowExactRuns * PERCENT / windowRuns else null,
             cadenceAverageExactPercent = if (totalRuns > 0L) totalExactRuns * PERCENT / totalRuns else null,
             logPath = logFile?.path,
+            warpFallback = warpFallback,
+            warpPercent = if (warpFallback != null && windowInBetween > 0L) windowWarped * PERCENT / windowInBetween else null,
+            sceneCuts = totalSceneCuts,
+            lastCutLowConfidence = lastCutLowConfidence,
+            lastCutHistogram = lastCutHistogram,
+            drawCpuP95 = percentile(draw, P95)?.let { Nanos(it) },
+            statsPollMax = if (windowStatsPollMaxNs > 0L) Nanos(windowStatsPollMaxNs) else null,
         )
     }
 
@@ -254,7 +323,7 @@ internal class FrameTelemetry(
     }
 
     /** Null before Android 11, which is when the thermal API arrived. */
-    private fun thermalHeadroom(): Float? {
+    private fun readThermalHeadroom(): Float? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         val power = context.getSystemService(PowerManager::class.java) ?: return null
         val headroom = power.getThermalHeadroom(THERMAL_FORECAST_SECONDS)
