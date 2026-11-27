@@ -6,6 +6,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.smoothplayer.engine.api.PlaybackEngine
 import com.example.smoothplayer.engine.api.RenderTargetController
+import com.example.smoothplayer.engine.api.model.EngineState
+import com.example.smoothplayer.engine.api.model.Micros
+import com.example.smoothplayer.feature.player.BuildConfig
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,14 +53,18 @@ public class PlayerViewModel(
         _uiState.update { PlayerReducer.reduce(it, event) }
         when (event) {
             PlayerEvent.ChooseFileClicked -> _effects.trySend(PlayerEffect.OpenFilePicker)
-            is PlayerEvent.FileChosen -> openFile(event.uri)
+            is PlayerEvent.FileChosen -> {
+                engine.setBenchmark(null)
+                openFile(event.uri)
+            }
             PlayerEvent.PlayPauseClicked -> togglePlayback()
             is PlayerEvent.SeekRequested -> engine.seekTo(event.position)
             PlayerEvent.LoggingToggled -> engine.setTelemetryLogging(_uiState.value.loggingEnabled)
+            PlayerEvent.BenchToggled -> toggleBench()
             PlayerEvent.InterpolationToggled -> engine.setInterpolationMode(_uiState.value.interpolation)
             PlayerEvent.DebugViewCycled -> engine.setDebugView(_uiState.value.debugView)
             PlayerEvent.FullscreenToggled -> Unit
-            is PlayerEvent.EngineStateChanged -> Unit
+            is PlayerEvent.EngineStateChanged -> if (event.state == EngineState.Ended) loopIfBenchmarking()
             is PlayerEvent.PositionChanged -> Unit
             is PlayerEvent.StatsReceived -> Unit
             PlayerEvent.StatsToggled -> Unit
@@ -71,6 +78,30 @@ public class PlayerViewModel(
 
     private fun openFile(uri: String) {
         viewModelScope.launch { engine.open(uri) }
+    }
+
+    /**
+     * Starts or ends a benchmark run. A run starts playback if it is not already going, so one tap is enough on the
+     * phone. Its label carries the build, so a log from a stale APK is easy to spot.
+     */
+    private fun toggleBench() {
+        if (!_uiState.value.benchRunning) {
+            engine.setBenchmark(null)
+            return
+        }
+        engine.setBenchmark("build=${BuildConfig.BUILD_ID}")
+        when (_uiState.value.phase) {
+            PlayerUiState.Phase.Ready, PlayerUiState.Phase.Paused, PlayerUiState.Phase.Ended -> engine.play()
+            else -> Unit
+        }
+    }
+
+    /** Sustained runs need 10 to 60 minutes of playback, longer than most clips, so a run plays the clip again. */
+    private fun loopIfBenchmarking() {
+        if (!_uiState.value.benchRunning) return
+        // From Ended, a seek leaves the engine paused at the start without resetting the run's counters.
+        engine.seekTo(Micros(0L))
+        engine.play()
     }
 
     private fun togglePlayback() {

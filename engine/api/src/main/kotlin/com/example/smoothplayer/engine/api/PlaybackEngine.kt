@@ -43,6 +43,15 @@ public interface PlaybackEngine {
     public fun setTelemetryLogging(enabled: Boolean)
 
     /**
+     * Starts a Step 8 benchmark run when [label] is not null, or ends the current one when it is. A run writes one CSV
+     * row per second (cadence, stage timings, heat, battery) to Download/SmoothPlayer, headed by [label] and the clip,
+     * and times the pipeline stages for the first minute of every five (see [PlaybackStats.stageProbeOn]). Those
+     * timings wait for the GPU, so they cost cadence while they run. The path is reported in [PlaybackStats.benchPath].
+     * Looping the clip is up to the caller.
+     */
+    public fun setBenchmark(label: String?)
+
+    /**
      * Chooses how each refresh's frame is picked. Takes effect on the next refresh, and playback keeps going.
      * [InterpolationMode.Blend] and [InterpolationMode.MotionCompensated] decode one frame ahead of the screen, so the
      * frame after the current one is ready when an in-between frame needs it.

@@ -8,7 +8,8 @@ import com.example.smoothplayer.engine.api.model.InterpolationMode
 internal object PlayerReducer {
     fun reduce(state: PlayerUiState, event: PlayerEvent): PlayerUiState = when (event) {
         PlayerEvent.ChooseFileClicked -> state
-        is PlayerEvent.FileChosen -> state.copy(phase = PlayerUiState.Phase.Preparing, error = null)
+        // A new file ends a benchmark run: its log is about the clip it started on.
+        is PlayerEvent.FileChosen -> state.copy(phase = PlayerUiState.Phase.Preparing, error = null, benchRunning = false)
         PlayerEvent.PlayPauseClicked -> state
         is PlayerEvent.EngineStateChanged -> state.fromEngine(event.state)
         is PlayerEvent.PositionChanged -> state.copy(position = event.position)
@@ -16,6 +17,7 @@ internal object PlayerReducer {
         is PlayerEvent.StatsReceived -> state.copy(stats = event.stats)
         PlayerEvent.StatsToggled -> state.copy(statsVisible = !state.statsVisible)
         PlayerEvent.LoggingToggled -> state.copy(loggingEnabled = !state.loggingEnabled)
+        PlayerEvent.BenchToggled -> state.copy(benchRunning = !state.benchRunning)
         PlayerEvent.InterpolationToggled -> state.copy(interpolation = state.interpolation.other())
         PlayerEvent.DebugViewCycled -> state.copy(debugView = state.debugView.next())
         PlayerEvent.FullscreenToggled -> state.copy(fullscreen = !state.fullscreen)

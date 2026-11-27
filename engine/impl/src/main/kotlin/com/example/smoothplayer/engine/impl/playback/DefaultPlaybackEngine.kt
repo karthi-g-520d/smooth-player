@@ -4,6 +4,9 @@ import android.content.Context
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
+import android.provider.OpenableColumns
+import android.util.Log
 import android.view.Surface
 import com.example.smoothplayer.engine.api.PlaybackEngine
 import com.example.smoothplayer.engine.api.RenderTargetController
@@ -11,6 +14,7 @@ import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.InterpolationMode
+import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
@@ -19,6 +23,7 @@ import com.example.smoothplayer.engine.impl.clock.WallClock
 import com.example.smoothplayer.engine.impl.decoder.AudioDecoder
 import com.example.smoothplayer.engine.impl.decoder.VideoDecoder
 import com.example.smoothplayer.engine.impl.gl.VideoRenderer
+import com.example.smoothplayer.engine.impl.telemetry.BenchLog
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
 import java.io.File
 import kotlinx.coroutines.CoroutineDispatcher
@@ -31,6 +36,7 @@ private const val MIME_VIDEO_PREFIX = "video/"
 private const val MIME_AUDIO_PREFIX = "audio/"
 private const val NO_ROTATION_DEGREES = 0
 private const val MAX_AUDIO_CHANNELS = 2
+private const val TAG = "FI/Engine"
 
 /**
  * Plays one local file into the surface it is given. Decoding is hardware. Audio is the master clock, and
@@ -130,8 +136,54 @@ public class DefaultPlaybackEngine(
         }
     }
 
+    override fun setBenchmark(label: String?) {
+        if (label == null) {
+            telemetry.stopBench()
+            _stats.value = _stats.value.copy(benchPath = null, stageProbeOn = false)
+            return
+        }
+        val log = try {
+            BenchLog.open(context, System.currentTimeMillis(), benchMeta(label))
+        } catch (e: Exception) {
+            Log.w(TAG, "could not open the benchmark log", e)
+            return
+        }
+        telemetry.startBench(log, System.nanoTime())
+        _stats.value = _stats.value.copy(benchPath = log.displayPath)
+    }
+
+    /** The `# key=value` lines at the top of a benchmark log: who ran what, on which device. */
+    private fun benchMeta(label: String): List<Pair<String, String>> {
+        val opened = source
+        return listOf(
+            "label" to label,
+            "started" to java.time.Instant.now().toString(),
+            "device" to "${Build.MANUFACTURER} ${Build.MODEL}",
+            "android" to Build.VERSION.RELEASE,
+            "clip" to (opened?.let { displayName(it.uri) } ?: ""),
+            "size" to (opened?.info?.let { "${it.width}x${it.height}" } ?: ""),
+            "frame_rate" to (opened?.video?.format?.intOrDefault(MediaFormat.KEY_FRAME_RATE, 0)?.toString() ?: ""),
+            "duration_s" to (opened?.info?.let { (it.durationUs.value / MICROS_PER_SECOND).toString() } ?: ""),
+            "has_audio" to (opened?.info?.hasAudio?.toString() ?: ""),
+        )
+    }
+
+    /** The file's name as the picker shows it, or the last part of the URI. */
+    private fun displayName(uri: String): String {
+        val parsed = Uri.parse(uri)
+        val fromResolver = try {
+            context.contentResolver.query(parsed, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+        return (fromResolver ?: parsed.lastPathSegment ?: uri).replace(',', ' ')
+    }
+
     override fun setInterpolationMode(mode: InterpolationMode) {
         interpolation = mode
+        telemetry.setMode(mode)
         renderer?.setInterpolationMode(mode)
     }
 
@@ -146,6 +198,7 @@ public class DefaultPlaybackEngine(
         renderer = null
         closeSource()
         telemetry.stopLog()
+        telemetry.stopBench()
         _stats.value = PlaybackStats()
         _state.value = EngineState.Idle
     }
@@ -260,7 +313,7 @@ public class DefaultPlaybackEngine(
             rotationDegrees = video.format.intOrDefault(MediaFormat.KEY_ROTATION, NO_ROTATION_DEGREES),
             hasAudio = audio != null,
         )
-        return OpenSource(video, audio, info)
+        return OpenSource(uri, video, audio, info)
     }
 
     /**
@@ -285,6 +338,7 @@ public class DefaultPlaybackEngine(
 
     /** Everything needed to decode a file, kept from [open] until the next open or [release]. */
     private class OpenSource(
+        val uri: String,
         val video: TrackSource,
         val audio: TrackSource?,
         val info: VideoInfo,

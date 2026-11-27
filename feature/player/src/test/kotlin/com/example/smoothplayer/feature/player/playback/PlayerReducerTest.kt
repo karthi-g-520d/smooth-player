@@ -90,6 +90,19 @@ class PlayerReducerTest {
     }
 
     @Test
+    fun `the bench button starts and stops a run`() {
+        val running = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.BenchToggled)
+        assertEquals(true, running.benchRunning)
+        assertEquals(false, PlayerReducer.reduce(running, PlayerEvent.BenchToggled).benchRunning)
+    }
+
+    @Test
+    fun `choosing another file ends a bench run`() {
+        val state = PlayerReducer.reduce(PlayerUiState(benchRunning = true), PlayerEvent.FileChosen("content://next.mp4"))
+        assertEquals(false, state.benchRunning)
+    }
+
+    @Test
     fun `the interpolation toggle steps from duplicate to blend to motion-compensated and back`() {
         val blend = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.InterpolationToggled)
         assertEquals(InterpolationMode.Blend, blend.interpolation)
