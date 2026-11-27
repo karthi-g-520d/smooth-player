@@ -60,6 +60,8 @@ internal class FrameTelemetry(
     private var windowInBetween = 0L
     private var windowWarped = 0L
     private var totalSceneCuts = 0L
+    private var lastCutLowConfidence: Float? = null
+    private var lastCutHistogram: Float? = null
     private var warpFallback: WarpFallback? = null
 
     private var windowStartNs: Long? = null
@@ -111,6 +113,8 @@ internal class FrameTelemetry(
             windowInBetween = 0L
             windowWarped = 0L
             totalSceneCuts = 0L
+            lastCutLowConfidence = null
+            lastCutHistogram = null
             warpFallback = null
         }
     }
@@ -210,9 +214,16 @@ internal class FrameTelemetry(
         }
     }
 
-    /** Records a frame pair held across a scene cut. Called on the GL thread, once per pair. */
-    fun onSceneCut() {
-        synchronized(lock) { totalSceneCuts++ }
+    /**
+     * Records a frame pair held across a scene cut, with the stats that made it one, so the overlay can show what the
+     * cut rule saw. Called on the GL thread, once per pair.
+     */
+    fun onSceneCut(lowConfidence: Float, histogramDistance: Float) {
+        synchronized(lock) {
+            totalSceneCuts++
+            lastCutLowConfidence = lowConfidence
+            lastCutHistogram = histogramDistance
+        }
     }
 
     /** Records the warp's current fallback, or null outside the motion-compensated mode. Called on the GL thread. */
@@ -297,6 +308,8 @@ internal class FrameTelemetry(
             warpFallback = warpFallback,
             warpPercent = if (warpFallback != null && windowInBetween > 0L) windowWarped * PERCENT / windowInBetween else null,
             sceneCuts = totalSceneCuts,
+            lastCutLowConfidence = lastCutLowConfidence,
+            lastCutHistogram = lastCutHistogram,
             drawCpuP95 = percentile(draw, P95)?.let { Nanos(it) },
             statsPollMax = if (windowStatsPollMaxNs > 0L) Nanos(windowStatsPollMaxNs) else null,
         )

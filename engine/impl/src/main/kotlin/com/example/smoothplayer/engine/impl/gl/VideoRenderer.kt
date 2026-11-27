@@ -722,7 +722,12 @@ internal class VideoRenderer(
             accountedPairPtsUs = nextPts
             accountedPairIsCut = slotFields.isCut(slot)
             // A cut is one pair, not a trend, so it does not move the low-confidence fallback.
-            if (accountedPairIsCut) telemetry.onSceneCut() else governor.onPair(slotFields.stats(slot))
+            val stats = slotFields.stats(slot)
+            if (accountedPairIsCut) {
+                telemetry.onSceneCut(stats.lowConfidenceFraction, stats.histogramDistance)
+            } else {
+                governor.onPair(stats)
+            }
         }
         if (accountedPairIsCut) return DRAW_HOLD
         return when (governor.fallback) {

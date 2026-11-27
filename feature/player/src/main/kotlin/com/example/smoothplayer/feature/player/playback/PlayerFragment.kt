@@ -220,7 +220,10 @@ public class PlayerFragment(
             },
         )
         val warped = warpPercent?.let { getString(R.string.player_stats_percent, it) } ?: notAvailable()
-        return getString(R.string.player_stats_warp, state, warped, sceneCuts)
+        val line = getString(R.string.player_stats_warp, state, warped, sceneCuts)
+        val unmatched = lastCutLowConfidence ?: return line
+        val toneChange = lastCutHistogram ?: return line
+        return "$line\n${getString(R.string.player_stats_last_cut, unmatched, toneChange)}"
     }
 
     /** The current one-second cadence, with the whole-playback average beside it once there is one. */

@@ -30,6 +30,10 @@ public data class PlaybackStats(
     val warpPercent: Float? = null,
     /** Frame pairs since the file opened that were held rather than interpolated, because they span a scene cut. */
     val sceneCuts: Long = 0L,
+    /** The last scene cut's share of unmatched textured blocks, 0 to 1. Null before the first cut. */
+    val lastCutLowConfidence: Float? = null,
+    /** The last scene cut's luma histogram distance, 0 to 2. Null before the first cut. */
+    val lastCutHistogram: Float? = null,
     /** The GL thread's time to issue one present draw, swap excluded, p95 over the recent draws. */
     val drawCpuP95: Nanos? = null,
     /** The longest poll of a pair's stats over the last second. Null when no stats were polled. */
