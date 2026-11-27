@@ -19,6 +19,10 @@ android {
     }
 
     buildTypes {
+        // Test build only: installs next to the regular app, so the phone keeps both.
+        debug {
+            applicationIdSuffix = ".metest"
+        }
         release {
             optimization {
                 enable = true

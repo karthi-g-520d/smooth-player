@@ -77,7 +77,7 @@ internal const val LUMA_PASSES_ENABLED = true
  * The coarse-to-fine search on uncapped 1/4 luma took 6 to 8 ms and gave 93.9% cadence. The motion luma is now capped
  * at 320x180 (see [motionLumaDivisor]), where the search measured about 4 ms.
  */
-internal const val MOTION_SEARCH_ENABLED = false
+internal const val MOTION_SEARCH_ENABLED = true
 
 /**
  * Diagnostic switch for the GPU timer around motion estimation. Off, because on the vivo V2334 (MediaTek) the timer
