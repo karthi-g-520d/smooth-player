@@ -46,6 +46,9 @@
     <string name="player_stats">display %1$.1f fps · content %2$.1f fps\nrendered %3$d · dropped %4$d · A/V drift %5$s\nGPU present p50 %6$s · p95 %7$s\nGPU motion p50 %8$s · p95 %9$s\nrefresh %10$.0f Hz · thermal %11$s · cadence %12$s</string>
     <string name="player_mode_duplicate">Mode: duplicate frames</string>
     <string name="player_mode_blend">Mode: blend frames</string>
+    <string name="player_view_normal">View: normal</string>
+    <string name="player_view_motion">View: motion vectors</string>
+    <string name="player_view_match_error">View: match error</string>
     <string name="player_fullscreen_enter">Fullscreen</string>
     <string name="player_fullscreen_exit">Exit fullscreen</string>
     <string name="player_log_start">Log CSV</string>

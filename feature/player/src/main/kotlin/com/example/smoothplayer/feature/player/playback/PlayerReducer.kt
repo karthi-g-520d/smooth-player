@@ -1,5 +1,6 @@
 package com.example.smoothplayer.feature.player.playback
 
+import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 
@@ -16,12 +17,20 @@ internal object PlayerReducer {
         PlayerEvent.StatsToggled -> state.copy(statsVisible = !state.statsVisible)
         PlayerEvent.LoggingToggled -> state.copy(loggingEnabled = !state.loggingEnabled)
         PlayerEvent.InterpolationToggled -> state.copy(interpolation = state.interpolation.other())
+        PlayerEvent.DebugViewCycled -> state.copy(debugView = state.debugView.next())
         PlayerEvent.FullscreenToggled -> state.copy(fullscreen = !state.fullscreen)
     }
 
     private fun InterpolationMode.other(): InterpolationMode = when (this) {
         InterpolationMode.Duplicate -> InterpolationMode.Blend
         InterpolationMode.Blend -> InterpolationMode.Duplicate
+    }
+
+    /** Normal picture, then motion vectors, then match error, then back to normal. */
+    private fun DebugView.next(): DebugView = when (this) {
+        DebugView.Off -> DebugView.MotionVectors
+        DebugView.MotionVectors -> DebugView.MatchError
+        DebugView.MatchError -> DebugView.Off
     }
 
     private fun PlayerUiState.fromEngine(engineState: EngineState): PlayerUiState = when (engineState) {

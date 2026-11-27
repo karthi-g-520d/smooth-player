@@ -320,6 +320,19 @@ Effort assumes one developer who knows Kotlin but is new to GL and codecs. "d" m
 
 **Present stall fix (2026-11-27):** with the search on, the October Blend-mode run averaged 93.0% cadence against 95.9% off, with swap and draw stalls of 100+ ms about every 10 s. Frames arrive just before the vsync that shows them, and the search was queued on arrival, so it sat on the GPU ahead of that vsync's draw. It now runs straight after `eglSwapBuffers` and is flushed (PR #20), and the motion GPU timer is off because its query never returns on MediaTek. Phone A/B on the vivo, Blend mode, 1080p clip, overlay numbers: ME on 95.9% average, 3 drops, A/V drift -3 ms, thermal 0.83; ME off 89.9%, 3 drops, drift 0 ms, thermal 0.98 (the off run was hotter). ME no longer costs cadence beyond run-to-run noise, so `MOTION_SEARCH_ENABLED` is on. Blend mode on the vivo stays under the 99% bar either way, which is a pacing/thermal issue separate from ME. Still open: the MV visualization view and the synthetic-pan clip check.
 
+**Synthetic-pan check (2026-11-27):** the plan's `testsrc2` recipe (§6.1) turned out to be almost all flat colour bars at 3840×1080, so most blocks have no detail to match and its moving parts (the square, the line, the counter) break the known ground truth. C1 is now a pan over a still, detailed texture: two octaves of smoothed noise, 1080p30 H.264, at 4, 16 and 40 px/frame (`tools/pan-check/run.sh`, which also runs the check). The check runs the CPU reference on the decoded frames, with luma made the way the renderer makes it, over 39 pairs and the interior blocks (a one-block border is skipped, since new content enters there). The GPU search matches the CPU reference exactly on the vivo, so this stands for the GPU too. Results, as vector error:
+
+| Clip | Motion luma | Median | p90 | Worst block | Blocks under 0.5 px at 1/4 |
+|---|---|---|---|---|---|
+| 1080p, 4 px/frame | 1/6 | 0.71 px (0.18 at 1/4) | 0.77 px | 0.93 px | 100% |
+| 1080p, 16 px/frame | 1/6 | 0.71 px (0.18 at 1/4) | 0.78 px | 1.04 px | 100% |
+| 1080p, 40 px/frame | 1/6 | 0.71 px (0.18 at 1/4) | 0.77 px | 1.09 px | 100% |
+| 720p, 10.67 px/frame | 1/4 | 0.48 px (0.12 at 1/4) | 0.52 px | 0.70 px | 100% |
+
+Errors are in source pixels, with the 1/4-resolution figure the bar uses in brackets. All pass the bar (median under 0.5 px at 1/4, which is 2 source px) by a wide margin. The error is a steady bias of about 0.12 motion-luma pixels at every speed, so it comes from the parabolic subpixel fit on SAD rather than from the search. Step 7 can correct it if the warp shows it. A JVM test (`MotionSearchTest`, the 1080p synthetic pan) now holds the 4 px/frame case in CI.
+
+**MV visualization (2026-11-27):** the player's new View button steps through normal, motion vectors and match error (`DebugView` in `:engine:api`, `motion_view.frag`). Motion vectors shows the video in grey with each block tinted by direction (right red, up green, left cyan, down violet) and stronger the faster it moved, plus an arrow per block the way the content moved; the arrow grows with the square root of the speed. Match error tints each block from green (residual 0) to red (residual 1, a best-match SAD as large as the block's own detail). It shows the newest searched pair, which can be a frame off the pair on screen. Rendered on Mesa llvmpipe with a synthetic field; not yet seen on the vivo.
+
 ### Step 7: Frame generation — bidirectional warp, blending, occlusion and confidence, scene cuts, fallbacks (10–12 d)
 **Key focus:** artifact control matters more than raw sharpness. A fallback that degrades gracefully beats a clever warp that sometimes tears.
 - **Upsample the vector field** from block resolution to pixel resolution by bilinear sampling of the `RG16F` texture. Optionally use edge-aware joint-bilateral upsampling against full-res luma to reduce the "block halo" at object edges.
@@ -438,9 +451,8 @@ These are engineering defaults drawn from the 3DRS and FRC literature. Expect to
 
 **FFmpeg recipes:**
 ```bash
-# Synthetic pan: 4 px/frame over a test pattern, 1080p30, 60 s
-ffmpeg -f lavfi -i "testsrc2=size=3840x1080:rate=30" -vf "crop=1920:1080:'mod(n*4,1920)':0" \
-  -t 60 -c:v libx264 -profile:v high -pix_fmt yuv420p -g 60 C1_pan4px.mp4
+# Synthetic pan: see tools/pan-check/run.sh, which pans 1080p30 over a still noise texture at 4, 16 and 40 px/frame.
+# (testsrc2 at 3840x1080 is mostly flat bars with moving parts, so it is not used for ME accuracy.)
 # Decimate 60 -> 30 for ground truth (keep even frames)
 ffmpeg -i src60.mp4 -vf "select='not(mod(n,2))',setpts=N/30/TB" -r 30 -c:v libx264 -pix_fmt yuv420p C12_30.mp4
 # Make a 720p version

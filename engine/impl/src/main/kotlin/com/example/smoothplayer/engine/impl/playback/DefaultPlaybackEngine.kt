@@ -9,6 +9,7 @@ import com.example.smoothplayer.engine.api.PlaybackEngine
 import com.example.smoothplayer.engine.api.RenderTargetController
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
+import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
@@ -57,6 +58,7 @@ public class DefaultPlaybackEngine(
 
     @Volatile private var source: OpenSource? = null
     @Volatile private var interpolation = InterpolationMode.Duplicate
+    @Volatile private var debugView = DebugView.Off
     private var videoDecoder: VideoDecoder? = null
     private var audioDecoder: AudioDecoder? = null
     private var wallClock: WallClock? = null
@@ -132,6 +134,11 @@ public class DefaultPlaybackEngine(
         renderer?.setInterpolationMode(mode)
     }
 
+    override fun setDebugView(view: DebugView) {
+        debugView = view
+        renderer?.setDebugView(view)
+    }
+
     override fun release() {
         stopPlayback()
         renderer?.close()
@@ -151,7 +158,10 @@ public class DefaultPlaybackEngine(
     }
 
     private fun ensureRenderer(): VideoRenderer =
-        renderer ?: VideoRenderer(context.assets, telemetry, interpolation).also { renderer = it }
+        renderer ?: VideoRenderer(context.assets, telemetry, interpolation).also {
+            it.setDebugView(debugView)
+            renderer = it
+        }
 
     private fun startFromBeginning() {
         val opened = source ?: return

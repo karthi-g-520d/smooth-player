@@ -55,6 +55,7 @@ public class PlayerViewModel(
             is PlayerEvent.SeekRequested -> engine.seekTo(event.position)
             PlayerEvent.LoggingToggled -> engine.setTelemetryLogging(_uiState.value.loggingEnabled)
             PlayerEvent.InterpolationToggled -> engine.setInterpolationMode(_uiState.value.interpolation)
+            PlayerEvent.DebugViewCycled -> engine.setDebugView(_uiState.value.debugView)
             PlayerEvent.FullscreenToggled -> Unit
             is PlayerEvent.EngineStateChanged -> Unit
             is PlayerEvent.PositionChanged -> Unit

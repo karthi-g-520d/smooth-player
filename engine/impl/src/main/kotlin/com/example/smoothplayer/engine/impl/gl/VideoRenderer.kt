@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.VideoInfo
@@ -43,12 +44,24 @@ private const val UNIFORM_TEXEL = 6
 private const val UNIFORM_TAPS = 7
 private const val UNIFORM_T = 6
 private const val UNIFORM_DEBUG_VIEW = 7
+// The motion view's fragment uniforms, at 6 to 11 in its own program.
+private const val UNIFORM_FRAME_SIZE = 6
+private const val UNIFORM_LUMA_PX = 7
+private const val UNIFORM_BLOCK_LUMA = 8
+private const val UNIFORM_MAX_VECTOR = 9
+private const val UNIFORM_MAX_RESIDUAL = 10
+private const val UNIFORM_VIEW = 11
+private const val MOTION_VIEW_VECTORS = 1
+private const val MOTION_VIEW_MATCH_ERROR = 2
+/** The residual the match-error view shows as fully red: a best-match SAD as large as the block's own detail. */
+private const val MAX_VIEW_RESIDUAL = 1f
 private const val UV_OFFSET_BYTES = 2 * BYTES_PER_FLOAT
 private const val VERTEX_SHADER_ASSET = "shaders/quad.vert"
 private const val COPY_SHADER_ASSET = "shaders/oes_to_rgba.frag"
 private const val LUMA_FINE_SHADER_ASSET = "shaders/luma_downsample.frag"
 private const val LUMA_COARSE_SHADER_ASSET = "shaders/luma_half.frag"
 private const val BLEND_SHADER_ASSET = "shaders/blend.frag"
+private const val MOTION_VIEW_SHADER_ASSET = "shaders/motion_view.frag"
 private const val TEXTURE_MATRIX_SIZE = 16
 private const val ROTATION_MATRIX_SIZE = 4
 private const val QUAD_HALF_EXTENT = 1f
@@ -148,6 +161,7 @@ internal class VideoRenderer(
     @Volatile private var contentHeight = 0
     @Volatile private var contentRotation = 0
     @Volatile private var mode = initialMode
+    @Volatile private var debugView = DebugView.Off
 
     /** Runs on the GL thread after each arriving frame is in the ring. The decoder releases the next frame from it. */
     @Volatile var onFrameCopied: (() -> Unit)? = null
@@ -166,6 +180,7 @@ internal class VideoRenderer(
     private var lumaFineProgram = 0
     private var lumaCoarseProgram = 0
     private var blendProgram = 0
+    private var motionViewProgram = 0
     private var vertexArray = 0
     private var vertexBuffer = 0
     private var ring: FrameRing? = null
@@ -208,6 +223,14 @@ internal class VideoRenderer(
     /** Chooses how the next refreshes pick their frames. Takes effect at the next vsync. */
     fun setInterpolationMode(newMode: InterpolationMode) {
         mode = newMode
+    }
+
+    /**
+     * Chooses a diagnostic view in place of the picture. Takes effect at the next vsync. The motion views need motion
+     * estimation; without it, the normal picture shows.
+     */
+    fun setDebugView(view: DebugView) {
+        debugView = view
     }
 
     /** Draws into [surface]. Redraws the newest frame straight away if one exists, so a rotation does not go black. */
@@ -346,6 +369,7 @@ internal class VideoRenderer(
             lumaFineProgram = linkProgram(vertexSource, loadAsset(LUMA_FINE_SHADER_ASSET))
             lumaCoarseProgram = linkProgram(vertexSource, loadAsset(LUMA_COARSE_SHADER_ASSET))
             blendProgram = linkProgram(vertexSource, loadAsset(BLEND_SHADER_ASSET))
+            motionViewProgram = linkProgram(vertexSource, loadAsset(MOTION_VIEW_SHADER_ASSET))
             createVertexState()
             gpuTimers = if (GPU_TIMERS_ENABLED) GpuTimerRing.createIfSupported() else null
             motionSearch = if (MOTION_SEARCH_ENABLED && LUMA_PASSES_ENABLED) createMotionSearch() else null
@@ -541,16 +565,51 @@ internal class VideoRenderer(
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
         val timers = gpuTimers
+        val view = debugView
         if (!EMPTY_PRESENT_ENABLED) trace(TraceNames.GL_DRAW) {
-            if (timers != null) {
-                timers.time({ drawBlend(frames, pick, rotation) }, telemetry::onPresentGpu)
-            } else {
-                drawBlend(frames, pick, rotation)
-            }
+            val draw = { drawPicture(frames, pick, rotation, view) }
+            if (timers != null) timers.time(draw, telemetry::onPresentGpu) else draw()
         }
 
         trace(TraceNames.GL_SWAP) { eglCore.swapBuffers(target, presentNs) }
         runPendingMotion()
+    }
+
+    /** The normal picture, or the chosen motion view when there is a motion field to show. */
+    @GlThread
+    private fun drawPicture(frames: FrameRing, pick: BlendPick, rotation: Int, view: DebugView) {
+        val search = motionSearch
+        if (search == null || search.motionTexture == 0) {
+            drawBlend(frames, pick, rotation)
+            return
+        }
+        when (view) {
+            DebugView.Off -> drawBlend(frames, pick, rotation)
+            DebugView.MotionVectors -> drawMotionView(frames, search, pick, rotation, MOTION_VIEW_VECTORS)
+            DebugView.MatchError -> drawMotionView(frames, search, pick, rotation, MOTION_VIEW_MATCH_ERROR)
+        }
+    }
+
+    /**
+     * The motion field over a grey copy of the newer frame of [pick]. The field is the newest searched pair, so it can
+     * be a frame ahead of or behind the pair on screen. That is close enough to judge the field by eye.
+     */
+    @GlThread
+    private fun drawMotionView(frames: FrameRing, search: GpuMotionSearch, pick: BlendPick, rotation: Int, view: Int) {
+        GLES30.glUseProgram(motionViewProgram)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.b))
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, search.motionTexture)
+        GLES30.glUniform2f(UNIFORM_FRAME_SIZE, frames.width.toFloat(), frames.height.toFloat())
+        GLES30.glUniform1f(UNIFORM_LUMA_PX, frames.motionLumaDivisor.toFloat())
+        GLES30.glUniform1f(UNIFORM_BLOCK_LUMA, search.blockSize.toFloat())
+        GLES30.glUniform1f(UNIFORM_MAX_VECTOR, search.maxVector.toFloat())
+        GLES30.glUniform1f(UNIFORM_MAX_RESIDUAL, MAX_VIEW_RESIDUAL)
+        GLES30.glUniform1i(UNIFORM_VIEW, view)
+        drawFullScreenQuad(rotation = clockwiseRotation(rotation, rotationMatrix), uvMatrix = IDENTITY_4)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
     }
 
     @GlThread
@@ -602,6 +661,7 @@ internal class VideoRenderer(
         GLES30.glDeleteProgram(lumaFineProgram)
         GLES30.glDeleteProgram(lumaCoarseProgram)
         GLES30.glDeleteProgram(blendProgram)
+        GLES30.glDeleteProgram(motionViewProgram)
         GLES30.glDeleteBuffers(1, intArrayOf(vertexBuffer), 0)
         GLES30.glDeleteVertexArrays(1, intArrayOf(vertexArray), 0)
         GLES30.glDeleteTextures(1, intArrayOf(textureId), 0)

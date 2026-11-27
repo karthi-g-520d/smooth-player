@@ -1,5 +1,6 @@
 package com.example.smoothplayer.engine.api
 
+import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.Micros
@@ -47,6 +48,9 @@ public interface PlaybackEngine {
      * when a blend needs it.
      */
     public fun setInterpolationMode(mode: InterpolationMode)
+
+    /** Chooses a diagnostic view in place of the normal picture. Takes effect on the next refresh. */
+    public fun setDebugView(view: DebugView)
 
     /** Releases all resources. The engine cannot be reused after this; create a new instance. */
     public fun release()
