@@ -107,6 +107,11 @@ class GpuMotionSearchTest {
                 "$block residual ${actual.residual[i]}, expected ${expected.residual[i]}",
                 residualError <= RESIDUAL_RELATIVE_TOLERANCE * maxOf(1f, expected.residual[i]),
             )
+            val deviationError = abs(expected.deviation[i] - actual.deviation[i])
+            assertTrue(
+                "$block deviation ${actual.deviation[i]}, expected ${expected.deviation[i]}",
+                deviationError <= RESIDUAL_RELATIVE_TOLERANCE * maxOf(1f, expected.deviation[i]),
+            )
         }
     }
 

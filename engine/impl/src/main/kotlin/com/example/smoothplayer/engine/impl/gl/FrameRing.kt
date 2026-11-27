@@ -25,6 +25,7 @@ internal class FrameRing(val width: Int, val height: Int) : AutoCloseable {
     val fineHeight: Int = ceilDiv(height, motionLumaDivisor)
     val coarseWidth: Int = ceilDiv(fineWidth, COARSE_FROM_FINE)
     val coarseHeight: Int = ceilDiv(fineHeight, COARSE_FROM_FINE)
+    val slotCount: Int = SLOT_COUNT
 
     private val frames = IntArray(SLOT_COUNT)
     private val lumaFine = IntArray(SLOT_COUNT)

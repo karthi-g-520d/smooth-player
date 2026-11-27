@@ -24,4 +24,10 @@ public data class PlaybackStats(
     /** The same percentage, over the whole playback so far. */
     val cadenceAverageExactPercent: Float? = null,
     val logPath: String? = null,
+    /** The warp's whole-picture fallback right now. Null outside [InterpolationMode.MotionCompensated]. */
+    val warpFallback: WarpFallback? = null,
+    /** Percent of in-between refreshes, over the last second, that were drawn with the warp rather than a fallback. */
+    val warpPercent: Float? = null,
+    /** Frame pairs since the file opened that were held rather than interpolated, because they span a scene cut. */
+    val sceneCuts: Long = 0L,
 )

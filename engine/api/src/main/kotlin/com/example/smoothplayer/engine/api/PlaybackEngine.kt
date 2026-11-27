@@ -44,8 +44,8 @@ public interface PlaybackEngine {
 
     /**
      * Chooses how each refresh's frame is picked. Takes effect on the next refresh, and playback keeps going.
-     * [InterpolationMode.Blend] decodes one frame ahead of the screen, so the frame after the current one is ready
-     * when a blend needs it.
+     * [InterpolationMode.Blend] and [InterpolationMode.MotionCompensated] decode one frame ahead of the screen, so the
+     * frame after the current one is ready when an in-between frame needs it.
      */
     public fun setInterpolationMode(mode: InterpolationMode)
 

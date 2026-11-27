@@ -1,11 +1,11 @@
 #version 310 es
 // 3x3 component-wise median of the motion field: the GPU form of medianFiltered in MotionSearch.kt. The median is over
 // total vectors (integer plus subpixel), split back into the nearest integer and a subpixel offset. Edges repeat the
-// nearest block. The residual is kept per block, not filtered. The defines come from GpuMotionSearch.kt.
+// nearest block. The residual and deviation are kept per block, not filtered. The defines come from GpuMotionSearch.kt.
 //
 // IN : b_raw (the search pass's field), u_grid (block columns and rows)
 // OUT: b_filtered (the same layout, read back by tests), u_motionImage (RGBA16F, one texel per block:
-//      x, y = total vector in luma pixels, z = residual, w = 1), which the warp pass will sample
+//      x, y = total vector in luma pixels, z = residual, w = deviation), which the warp pass samples
 precision highp float;
 precision highp int;
 
@@ -20,7 +20,7 @@ struct Block {
     ivec2 vector;
     vec2 subpixel;
     float residual;
-    float pad;
+    float deviation; // mean absolute deviation of the block's pixels from their mean: its detail per pixel
 };
 
 layout(std430, binding = BINDING_RAW_FIELD) readonly buffer RawField { Block b_raw[]; };
@@ -65,7 +65,7 @@ void main() {
     filtered.vector = ivec2(floor(total + HALF_PIXEL));
     filtered.subpixel = total - vec2(filtered.vector);
     filtered.residual = b_raw[index].residual;
-    filtered.pad = 0.0;
+    filtered.deviation = b_raw[index].deviation;
     b_filtered[index] = filtered;
-    imageStore(u_motionImage, block, vec4(total, filtered.residual, 1.0));
+    imageStore(u_motionImage, block, vec4(total, filtered.residual, filtered.deviation));
 }

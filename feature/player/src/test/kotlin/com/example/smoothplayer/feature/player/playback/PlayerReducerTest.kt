@@ -90,19 +90,23 @@ class PlayerReducerTest {
     }
 
     @Test
-    fun `the interpolation toggle switches between duplicate and blend, starting from duplicate`() {
+    fun `the interpolation toggle steps from duplicate to blend to motion-compensated and back`() {
         val blend = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.InterpolationToggled)
         assertEquals(InterpolationMode.Blend, blend.interpolation)
-        assertEquals(InterpolationMode.Duplicate, PlayerReducer.reduce(blend, PlayerEvent.InterpolationToggled).interpolation)
+        val motion = PlayerReducer.reduce(blend, PlayerEvent.InterpolationToggled)
+        assertEquals(InterpolationMode.MotionCompensated, motion.interpolation)
+        assertEquals(InterpolationMode.Duplicate, PlayerReducer.reduce(motion, PlayerEvent.InterpolationToggled).interpolation)
     }
 
     @Test
-    fun `the view button steps from normal to motion vectors to match error and back`() {
+    fun `the view button steps from normal to motion vectors to match error to warp confidence and back`() {
         val motion = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.DebugViewCycled)
         assertEquals(DebugView.MotionVectors, motion.debugView)
         val error = PlayerReducer.reduce(motion, PlayerEvent.DebugViewCycled)
         assertEquals(DebugView.MatchError, error.debugView)
-        assertEquals(DebugView.Off, PlayerReducer.reduce(error, PlayerEvent.DebugViewCycled).debugView)
+        val confidence = PlayerReducer.reduce(error, PlayerEvent.DebugViewCycled)
+        assertEquals(DebugView.WarpConfidence, confidence.debugView)
+        assertEquals(DebugView.Off, PlayerReducer.reduce(confidence, PlayerEvent.DebugViewCycled).debugView)
     }
 
     @Test

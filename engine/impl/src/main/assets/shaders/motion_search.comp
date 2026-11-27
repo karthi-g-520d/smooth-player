@@ -12,7 +12,7 @@
 //
 // IN : u_prevLuma, u_nextLuma (R8 luma at 1/4), u_planeSize (1/4 size in pixels), u_grid (block columns and rows),
 //      b_coarse (the coarse pass's vectors)
-// OUT: b_raw[block] = integer vector, subpixel offset and residual, before the median filter
+// OUT: b_raw[block] = integer vector, subpixel offset, residual and deviation, before the median filter
 precision highp float;
 precision highp int;
 
@@ -31,7 +31,7 @@ struct Block {
     ivec2 vector;
     vec2 subpixel;
     float residual;
-    float pad;
+    float deviation; // mean absolute deviation of the block's pixels from their mean: its detail per pixel
 };
 
 layout(binding = BINDING_PREV_LUMA) uniform highp sampler2D u_prevLuma;
@@ -50,7 +50,7 @@ shared int s_sad[CANDIDATE_COUNT];
 shared ivec2 s_predictor;
 shared int s_fitSad[FIT_SAMPLES];
 
-// The best vector itself, then its left, right, upper and lower neighbours, for the parabola fit.
+// The best vector itself, then its left, right, upper and lower neighbours, for the subpixel fit.
 const ivec2 FIT_OFFSETS[FIT_SAMPLES] = ivec2[FIT_SAMPLES](
     ivec2(0, 0), ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
 const float HALF_PIXEL = 0.5;
@@ -132,12 +132,13 @@ float blockDetail(ivec2 valid) {
     return detail;
 }
 
-// Same rules as subpixelOffset in MotionSearch.kt: zero for an exact match or when the samples are not a minimum.
+// The equiangular (V) fit of subpixelOffset in MotionSearch.kt, with the same rules: zero for an exact match or when
+// the samples are not a minimum.
 float subpixelOffset(int before, int centre, int after) {
-    if (centre == 0) return 0.0;
-    int curvature = before - 2 * centre + after;
-    if (curvature <= 0) return 0.0;
-    return clamp(HALF_PIXEL * float(before - after) / float(curvature), -HALF_PIXEL, HALF_PIXEL);
+    if (centre == 0 || before < centre || after < centre) return 0.0;
+    int rise = max(before, after) - centre;
+    if (rise <= 0) return 0.0;
+    return clamp(HALF_PIXEL * float(before - after) / float(rise), -HALF_PIXEL, HALF_PIXEL);
 }
 
 void main() {
@@ -198,8 +199,9 @@ void main() {
         result.subpixel = vec2(
             subpixelOffset(s_fitSad[1], centre, s_fitSad[2]),
             subpixelOffset(s_fitSad[3], centre, s_fitSad[4]));
-        result.residual = float(centre) / (blockDetail(valid) + 1.0);
-        result.pad = 0.0;
+        float detail = blockDetail(valid);
+        result.residual = float(centre) / (detail + 1.0);
+        result.deviation = detail / float(valid.x * valid.y);
         b_raw[block.y * u_grid.x + block.x] = result;
     }
 }

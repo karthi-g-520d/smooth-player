@@ -21,7 +21,8 @@ internal class LumaPlane(val width: Int, val height: Int, private val pixels: In
  * block's content in the next frame came from there in the previous frame: next(p) ≈ prev(p - v).
  *
  * [residual] is the best block's SAD divided by its detail, so a low value is a confident match. A flat block has
- * little detail, so a small SAD there is not treated as confident.
+ * little detail, so a small SAD there is not treated as confident. [deviation] is that detail per pixel: the mean
+ * absolute deviation of the block's pixels in the next frame from their mean, near zero for a flat block.
  */
 internal class MotionField(val columns: Int, val rows: Int) {
     val dx = IntArray(columns * rows)
@@ -29,6 +30,7 @@ internal class MotionField(val columns: Int, val rows: Int) {
     val subX = FloatArray(columns * rows)
     val subY = FloatArray(columns * rows)
     val residual = FloatArray(columns * rows)
+    val deviation = FloatArray(columns * rows)
 }
 
 /**
@@ -79,7 +81,7 @@ internal fun estimateMotion(
 /**
  * Block matching on luma, coarse to fine (see [MotionSearchConfig]). [prevCoarse] and [nextCoarse] are the frames at
  * half the size of [prev] and [next]. Each block minimises SAD plus its penalty, with ties going to the first candidate
- * in raster order. A parabola through the SAD at the best vector and its two neighbours gives the subpixel offset. The
+ * in raster order. A V fit through the SAD at the best vector and its two neighbours gives the subpixel offset. The
  * integer and subpixel parts go through a 3x3 median filter.
  *
  * This is the CPU reference for the GPU compute passes. It defines the result the GPU must match.
@@ -136,7 +138,11 @@ internal fun estimateMotion(
                 blockSad(prev, next, bx, by, config.blockSize, bestDx, bestDy + 1),
             )
             val bestSad = blockSad(prev, next, bx, by, config.blockSize, bestDx, bestDy)
-            field.residual[index] = bestSad / (blockDetail(next, bx, by, config.blockSize) + 1f)
+            val detail = blockDetail(next, bx, by, config.blockSize)
+            field.residual[index] = bestSad / (detail + 1f)
+            val pixels = (minOf((bx + 1) * config.blockSize, next.width) - bx * config.blockSize) *
+                (minOf((by + 1) * config.blockSize, next.height) - by * config.blockSize)
+            field.deviation[index] = detail / pixels
         }
     }
     return medianFiltered(field)
@@ -216,15 +222,18 @@ private fun blockDetail(next: LumaPlane, bx: Int, by: Int, size: Int): Float {
 }
 
 /**
- * The offset of the parabola's minimum from the centre sample, clamped to half a pixel. Zero when the three samples do
- * not form a minimum, so a flat or ambiguous match is not moved. Zero also when the centre is an exact match: SAD is
- * V-shaped rather than parabolic, so a parabola would move an exact whole-pixel match by up to half a pixel.
+ * The subpixel offset of the SAD minimum from the centre sample, clamped to half a pixel, from an equiangular (V) fit:
+ * two lines of equal and opposite slope, the steeper side setting the slope. SAD near its minimum is V-shaped, not
+ * parabolic. A parabola fit pulled every vector towards the nearest whole luma pixel: on the synthetic pans it was off
+ * by about 0.12 luma px (0.7 source px at 1080p) whenever the true motion was a third of a pixel from a whole one. The
+ * V fit cuts that to about 0.03. Zero when the three samples do not form a minimum, so a flat or ambiguous match is
+ * not moved, and zero for an exact match.
  */
 internal fun subpixelOffset(sadBefore: Int, sadCentre: Int, sadAfter: Int): Float {
-    if (sadCentre == 0) return 0f
-    val curvature = sadBefore - 2 * sadCentre + sadAfter
-    if (curvature <= 0) return 0f
-    val offset = HALF_PIXEL * (sadBefore - sadAfter).toFloat() / curvature
+    if (sadCentre == 0 || sadBefore < sadCentre || sadAfter < sadCentre) return 0f
+    val rise = maxOf(sadBefore, sadAfter) - sadCentre
+    if (rise <= 0) return 0f
+    val offset = HALF_PIXEL * (sadBefore - sadAfter).toFloat() / rise
     return offset.coerceIn(-HALF_PIXEL, HALF_PIXEL)
 }
 
@@ -247,7 +256,7 @@ private fun neighbourhoodMedian(values: IntArray, columns: Int, rows: Int, bx: I
  * Replaces each vector with the component-wise median of its 3x3 neighbourhood. The median is taken over total vectors
  * (integer plus subpixel), so a block never mixes one neighbour's integer part with another's subpixel part. The result
  * is split back into the nearest integer and a subpixel offset in [-0.5, 0.5]. Edges repeat the nearest block. The
- * residual is kept per block, not filtered.
+ * residual and deviation are kept per block, not filtered.
  */
 internal fun medianFiltered(field: MotionField): MotionField {
     val out = MotionField(field.columns, field.rows)
@@ -276,6 +285,7 @@ internal fun medianFiltered(field: MotionField): MotionField {
             out.subX[index] = totalX - out.dx[index]
             out.subY[index] = totalY - out.dy[index]
             out.residual[index] = field.residual[index]
+            out.deviation[index] = field.deviation[index]
         }
     }
     return out

@@ -1,0 +1,92 @@
+#version 310 es
+// Whole-pair stats for the warp's decisions: the GPU form of pairStats in WarpPolicy.kt, which defines the result.
+// Runs as one work group after the median pass. It counts the textured blocks (mean deviation at least FLAT_DEVIATION)
+// and those of them whose residual is above LOW_CONFIDENCE_RESIDUAL, and takes the L1 distance between the two frames'
+// luma histograms (HISTOGRAM_BINS bins, every HISTOGRAM_STEP-th pixel on each axis). The CPU reads the four counts once a fence says the pass is done, and decides from them whether the pair
+// is a scene cut and whether the warp is trusted. The defines come from GpuMotionSearch.kt.
+//
+// IN : u_prevLuma, u_nextLuma (R8 luma at the fine level), u_planeSize (its size in pixels), u_grid (block columns and
+//      rows), b_filtered (the median pass's field, for the residuals and deviations)
+// OUT: b_stats = textured blocks, low-confidence textured blocks, histogram pixels, histogram L1 difference
+precision highp float;
+precision highp int;
+
+layout(local_size_x = STATS_WORKGROUP_SIZE) in;
+
+#define LUMA_LEVELS 256
+
+struct Block {
+    ivec2 vector;
+    vec2 subpixel;
+    float residual;
+    float deviation; // mean absolute deviation of the block's pixels from their mean: its detail per pixel
+};
+
+layout(binding = BINDING_PREV_LUMA) uniform highp sampler2D u_prevLuma;
+layout(binding = BINDING_NEXT_LUMA) uniform highp sampler2D u_nextLuma;
+layout(std430, binding = BINDING_FILTERED_FIELD) readonly buffer FilteredField { Block b_filtered[]; };
+layout(std430, binding = BINDING_STATS) writeonly buffer Stats {
+    uint blocks;
+    uint lowConfidence;
+    uint pixels;
+    uint histogramDiff;
+} b_stats;
+layout(location = LOC_PLANE_SIZE) uniform ivec2 u_planeSize;
+layout(location = LOC_GRID) uniform ivec2 u_grid;
+
+shared uint s_histPrev[HISTOGRAM_BINS];
+shared uint s_histNext[HISTOGRAM_BINS];
+shared uint s_textured;
+shared uint s_lowConfidence;
+
+const float MAX_LUMA = 255.0;
+
+int binOf(highp sampler2D luma, ivec2 p) {
+    int level = int(round(texelFetch(luma, p, 0).r * MAX_LUMA));
+    return level * HISTOGRAM_BINS / LUMA_LEVELS;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    if (lane < uint(HISTOGRAM_BINS)) {
+        s_histPrev[lane] = 0u;
+        s_histNext[lane] = 0u;
+    }
+    if (lane == 0u) {
+        s_textured = 0u;
+        s_lowConfidence = 0u;
+    }
+    memoryBarrierShared();
+    barrier();
+
+    int blockCount = u_grid.x * u_grid.y;
+    for (int i = int(lane); i < blockCount; i += STATS_WORKGROUP_SIZE) {
+        // Flat blocks have nothing to match, so their residual says nothing about the pair.
+        if (b_filtered[i].deviation < FLAT_DEVIATION) continue;
+        atomicAdd(s_textured, 1u);
+        if (b_filtered[i].residual > LOW_CONFIDENCE_RESIDUAL) atomicAdd(s_lowConfidence, 1u);
+    }
+
+    ivec2 samples = (u_planeSize + HISTOGRAM_STEP - 1) / HISTOGRAM_STEP;
+    int sampleCount = samples.x * samples.y;
+    for (int i = int(lane); i < sampleCount; i += STATS_WORKGROUP_SIZE) {
+        ivec2 p = ivec2(i % samples.x, i / samples.x) * HISTOGRAM_STEP;
+        atomicAdd(s_histPrev[binOf(u_prevLuma, p)], 1u);
+        atomicAdd(s_histNext[binOf(u_nextLuma, p)], 1u);
+    }
+    memoryBarrierShared();
+    barrier();
+
+    if (lane == 0u) {
+        uint diff = 0u;
+        for (int bin = 0; bin < HISTOGRAM_BINS; bin++) {
+            uint a = s_histPrev[bin];
+            uint b = s_histNext[bin];
+            diff += a > b ? a - b : b - a;
+        }
+        b_stats.blocks = s_textured;
+        b_stats.lowConfidence = s_lowConfidence;
+        b_stats.pixels = uint(sampleCount);
+        b_stats.histogramDiff = diff;
+    }
+}
