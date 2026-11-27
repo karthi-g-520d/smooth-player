@@ -69,15 +69,16 @@ internal const val GPU_TIMERS_ENABLED = true
 internal const val LUMA_PASSES_ENABLED = true
 
 /**
- * Diagnostic switch for motion estimation. When on, each arriving frame's motion luma is matched against the frame
+ * Switch for motion estimation. When on, each arriving frame's motion luma is matched against the frame
  * before it on the GPU. Nothing shows the vectors yet. Needs [LUMA_PASSES_ENABLED].
  *
  * Off by default until GpuMotionSearchBenchmark shows the search within the Step 6 bar on the target devices. The
  * first, raster-order search took 26 ms per 1080p pair on the vivo V2334 and dropped playback cadence to about 70%.
  * The coarse-to-fine search on uncapped 1/4 luma took 6 to 8 ms and gave 93.9% cadence. The motion luma is now capped
- * at 320x180 (see [motionLumaDivisor]), where the search measured about 4 ms.
+ * at 320x180 (see [motionLumaDivisor]), where the search measured about 4 ms. Run straight after the swap, Blend-mode
+ * playback with it on averaged 95.9% cadence on the vivo (thermal 0.83), against 89.9% with it off (thermal 0.98).
  */
-internal const val MOTION_SEARCH_ENABLED = false
+internal const val MOTION_SEARCH_ENABLED = true
 
 /**
  * Diagnostic switch for the GPU timer around motion estimation. Off, because on the vivo V2334 (MediaTek) the timer
