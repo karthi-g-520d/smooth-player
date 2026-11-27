@@ -24,7 +24,7 @@ internal class MotionFields(
     slotCount: Int,
     val columns: Int,
     val rows: Int,
-    /** Gets the wall time, in nanoseconds, of every fence poll that was not answered from the stored flag. */
+    /** Gets the wall time, in nanoseconds, of each [harvest] that had a fence to poll. */
     private val onPoll: (Long) -> Unit = {},
 ) : AutoCloseable {
     private val textures = IntArray(slotCount)
@@ -36,6 +36,8 @@ internal class MotionFields(
     private val lowConfidence = FloatArray(slotCount)
     private val histogram = FloatArray(slotCount)
     private val cut = BooleanArray(slotCount)
+    private val syncStatus = IntArray(1)
+    private val syncLength = IntArray(1)
 
     init {
         GLES30.glGenTextures(slotCount, textures, 0)
@@ -91,24 +93,30 @@ internal class MotionFields(
     fun holds(slot: Int, prevPtsUs: Long, nextPtsUs: Long): Boolean =
         prevPts[slot] == prevPtsUs && nextPts[slot] == nextPtsUs && prevPtsUs != NO_PTS
 
+    /** True once [slot]'s stats were read by [harvest]. Only checks a flag, so it is free on every refresh. */
+    fun statsReady(slot: Int): Boolean = ready[slot]
+
     /**
-     * True once the GPU has finished [slot]'s pair and its stats were read. Never waits: the first call after the fence
-     * signals maps the 16-byte buffer once, and later calls only check a flag. Cheap enough for every refresh.
+     * Reads the stats of every searched pair whose fence has signalled. Call it straight after a swap and before the
+     * next search is queued: on the vivo V2334 (Mali), mapping the stats buffer stalled the GL thread for up to 13 ms
+     * when done mid-draw, as the driver waited for the GPU work queued after the fence. Right after the swap only the
+     * present draw is in the queue. The fence status is queried with glGetSynciv, which never waits.
      */
-    fun statsReady(slot: Int): Boolean {
-        if (ready[slot]) return true
-        if (prevPts[slot] == NO_PTS) return false
-        val fence = fences[slot]
-        if (fence == NO_FENCE) return false
+    fun harvest() {
         val startNs = System.nanoTime()
-        val status = GLES30.glClientWaitSync(fence, 0, 0L)
-        if (status == GLES30.GL_ALREADY_SIGNALED || status == GLES30.GL_CONDITION_SATISFIED) {
+        var polled = false
+        for (slot in textures.indices) {
+            if (ready[slot] || prevPts[slot] == NO_PTS) continue
+            val fence = fences[slot]
+            if (fence == NO_FENCE) continue
+            polled = true
+            GLES30.glGetSynciv(fence, GLES30.GL_SYNC_STATUS, 1, syncLength, 0, syncStatus, 0)
+            if (syncStatus[0] != GLES30.GL_SIGNALED) continue
             deleteFence(slot)
             ready[slot] = readStats(slot)
         }
-        // Measured because a driver may stall the GL thread here, which would cost refreshes.
-        onPoll(System.nanoTime() - startNs)
-        return ready[slot]
+        // Measured, so the overlay shows whether the read still stalls.
+        if (polled) onPoll(System.nanoTime() - startNs)
     }
 
     /** True when [slot]'s pair spans a scene cut (see [isSceneCut]). Only valid once [statsReady] is true. */

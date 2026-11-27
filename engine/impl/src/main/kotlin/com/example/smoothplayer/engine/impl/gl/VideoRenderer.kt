@@ -655,6 +655,8 @@ internal class VideoRenderer(
         telemetry.onDrawCpu(System.nanoTime() - drawStartNs)
 
         trace(TraceNames.GL_SWAP) { eglCore.swapBuffers(target, presentNs) }
+        // Stats first: reading them before the next search is queued keeps the read from waiting on that search.
+        fields?.harvest()
         runPendingMotion()
     }
 
