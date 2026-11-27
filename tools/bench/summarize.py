@@ -49,6 +49,9 @@ def read_runs(path):
         if not runs or runs[-1].mode != row["mode"]:
             runs.append(Run(path, meta, row["mode"]))
         runs[-1].rows.append(row)
+    # The first row closes the second in which the run started, so it holds counts from before the run.
+    if runs and runs[0].rows:
+        runs[0].rows.pop(0)
     return runs
 
 
@@ -67,6 +70,26 @@ def pct(values, q):
 
 def fmt(value, unit="", digits=2):
     return "n/a" if value is None else f"{value:.{digits}f}{unit}"
+
+
+def find_period(gaps):
+    """The hitch period that best explains [gaps] between stutter events, and whether it is periodic.
+
+    A hitch that comes every P seconds but is sometimes absorbed leaves gaps of P, 2P, 3P. So each candidate P from 8 to
+    30 s scores the share of gaps within 1 s of 1 to 4 times P. Periodic means at least 70% fit, over 5 or more gaps.
+    Shorter periods are not tried, because 2 to 4 times a short P fits most gaps by chance. Random gaps fit the best P
+    at about 48%, and at most 57% in 50 trials, so 70% is clear of that.
+    """
+    if len(gaps) < 5:
+        return None, False
+    shares = {}
+    for tenth in range(80, 301):
+        p = tenth / 10.0
+        shares[p] = sum(1 for g in gaps if 1 <= round(g / p) <= 4 and abs(g - round(g / p) * p) <= 1.5) / len(gaps)
+    best_share = max(shares.values())
+    # Half the true period fits nearly as well (10 s gaps are 2 x 5 s), so take the longest period close to the best.
+    best_period = max(p for p, share in shares.items() if share >= best_share - 0.05)
+    return best_period, best_share >= 0.7
 
 
 def summarize(run):
@@ -92,9 +115,7 @@ def summarize(run):
             events[-1].append(t)
     starts = [e[0] for e in events]
     gaps = [b - a for a, b in zip(starts, starts[1:])]
-    period = statistics.median(gaps) if gaps else None
-    steady = sum(1 for g in gaps if period and abs(g - period) <= 0.25 * period)
-    periodic = len(gaps) >= 5 and steady >= 0.6 * len(gaps)
+    period, periodic = find_period(gaps)
     dropped = [num(r, "dropped_total") for r in rows]
     drops = (dropped[-1] - dropped[0]) if dropped and None not in (dropped[0], dropped[-1]) else None
 
@@ -168,13 +189,21 @@ def gates(s, baseline):
         ok = s["cadence"] >= CADENCE_BAR and not s["periodic_stutter"]
         out["2 cadence"] = ("PASS" if ok else "FAIL") + f" ({s['cadence']:.1f}%" + (", periodic stutter)" if s["periodic_stutter"] else ")")
     thermal_ok = s["status_max"] is None or s["status_max"] < SEVERE_THERMAL
-    if baseline and s is not baseline and baseline["drain_pct_h"] and s["drain_pct_h"] is not None:
-        ratio = s["drain_pct_h"] / baseline["drain_pct_h"]
-        out["4 heat/battery"] = ("PASS" if ratio <= BATTERY_RATIO_BAR and thermal_ok else "FAIL") + \
-            f" ({ratio:.2f}x baseline drain, max thermal {THERMAL_NAMES[s['status_max']] if s['status_max'] is not None else 'n/a'})"
+    status = THERMAL_NAMES[s["status_max"]] if s["status_max"] is not None else "n/a"
+    ratios = []
+    if baseline and s is not baseline:
+        # Mean current is the finer measure: battery % moves in whole steps and sits at 100% for a while after a charge.
+        if baseline["current_ma"] and s["current_ma"] is not None:
+            ratios.append(("current", abs(s["current_ma"]) / abs(baseline["current_ma"])))
+        if baseline["drain_pct_h"] and s["drain_pct_h"] is not None:
+            ratios.append(("battery %", s["drain_pct_h"] / baseline["drain_pct_h"]))
+    if ratios:
+        ok = ratios[0][1] <= BATTERY_RATIO_BAR and thermal_ok
+        detail = ", ".join(f"{name} {ratio:.2f}x baseline" for name, ratio in ratios)
+        out["4 heat/battery"] = ("PASS" if ok else "FAIL") + f" ({detail}, max thermal {status})"
     elif s["status_max"] is not None:
         out["4 heat/battery"] = ("heat PASS" if thermal_ok else "heat FAIL") + \
-            f" (max {THERMAL_NAMES[s['status_max']]}; battery needs a 30+ min run and a Duplicate baseline)"
+            f" (max {status}; battery needs a Duplicate baseline of the same clip)"
     return out
 
 
@@ -182,7 +211,7 @@ def render(summaries):
     lines = ["# Step 8 benchmark summary", ""]
     baselines = {}
     for s in summaries:
-        if s["mode"] == "Duplicate" and s["drain_pct_h"] is not None:
+        if s["mode"] == "Duplicate" and s["duration_s"] >= MIN_BATTERY_FIT_S:
             baselines.setdefault(s["clip"], s)
     for s in summaries:
         lines.append(f"## {s['clip'] or '(clip?)'} {s['size']}, {s['mode']}, {s['duration_s'] / 60:.1f} min")

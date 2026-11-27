@@ -588,9 +588,13 @@ internal class VideoRenderer(
         pendingMotionSlot = NO_PENDING_SLOT
         val frames = ring ?: return
         if (frames.pts(slot) != pendingMotionPtsUs) return
-        // While the heat or GPU fallback holds frames, nothing reads the fields, so the search is skipped to spare the
-        // GPU. The motion views still need it.
-        if (mode == InterpolationMode.MotionCompensated && governor.holdsFrames && debugView == DebugView.Off) return
+        // Only the motion-compensated mode and the motion views read the fields. Duplicate and Blend skip the search, so
+        // Duplicate is a true 30 fps baseline for the Step 8 battery runs (with the search on, it drew about 370 mA on
+        // the vivo). While the heat or GPU fallback holds frames, nothing reads the fields either, so it is skipped then.
+        if (debugView == DebugView.Off) {
+            if (mode != InterpolationMode.MotionCompensated) return
+            if (governor.holdsFrames) return
+        }
         if (estimateMotion(frames, slot)) GLES30.glFlush()
     }
 
