@@ -48,7 +48,6 @@ const float MAX_LUMA = 255.0;
 // The same rule as isSceneCut in WarpPolicy.kt.
 bool isSceneCut(float lowConfidence, float histogram) {
     return histogram >= CUT_HISTOGRAM_ALONE ||
-        (lowConfidence >= CUT_LOW_CONFIDENCE_ALONE && histogram >= CUT_LOW_CONFIDENCE_ALONE_HISTOGRAM) ||
         (histogram >= CUT_HISTOGRAM_DISTANCE && lowConfidence >= CUT_LOW_CONFIDENCE);
 }
 

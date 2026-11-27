@@ -15,12 +15,14 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.EngineError
+import com.example.smoothplayer.engine.api.model.InBetweenCounts
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.engine.api.model.WarpFallback
+import com.example.smoothplayer.feature.player.BuildConfig
 import com.example.smoothplayer.feature.player.R
 import com.example.smoothplayer.feature.player.databinding.FragmentPlayerBinding
 import kotlinx.coroutines.launch
@@ -28,6 +30,7 @@ import kotlinx.coroutines.launch
 private const val VIDEO_MIME_FILTER = "video/*"
 private const val MICROS_PER_MILLI = 1_000L
 private const val NANOS_PER_MILLI = 1_000_000.0
+private const val PERCENT = 100f
 
 /**
  * Thin view: launches the file picker, forwards clicks and surface events, and renders [PlayerUiState].
@@ -205,7 +208,8 @@ public class PlayerFragment(
             statsPollMax?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
         )
         val withWarp = warpText()?.let { "$text\n$cpu\n$it" } ?: "$text\n$cpu"
-        return logPath?.let { "$withWarp\n${getString(R.string.player_log_saved, it)}" } ?: withWarp
+        val withBuild = "$withWarp\n${getString(R.string.player_build, BuildConfig.BUILD_ID)}"
+        return logPath?.let { "$withBuild\n${getString(R.string.player_log_saved, it)}" } ?: withBuild
     }
 
     /** The warp's fallback, share of warped in-betweens and scene cuts. Null outside the motion-compensated mode. */
@@ -220,10 +224,26 @@ public class PlayerFragment(
             },
         )
         val warped = warpPercent?.let { getString(R.string.player_stats_percent, it) } ?: notAvailable()
-        val line = getString(R.string.player_stats_warp, state, warped, sceneCuts)
+        val split = inBetweens?.let { "\n${inBetweenText(it)}" } ?: ""
+        val line = getString(R.string.player_stats_warp, state, warped, sceneCuts) + split
         val unmatched = lastCutLowConfidence ?: return line
         val toneChange = lastCutHistogram ?: return line
         return "$line\n${getString(R.string.player_stats_last_cut, unmatched, toneChange)}"
+    }
+
+    /** Each way of drawing an in-between, as a share of all of them since the file opened. */
+    private fun inBetweenText(counts: InBetweenCounts): String {
+        val total = counts.total
+        fun share(count: Long): String =
+            if (total > 0L) getString(R.string.player_stats_percent, count * PERCENT / total) else notAvailable()
+        return getString(
+            R.string.player_stats_in_betweens,
+            share(counts.warped),
+            share(counts.searchPending),
+            share(counts.notSearched),
+            share(counts.lowConfidence),
+            share(counts.held),
+        )
     }
 
     /** The current one-second cadence, with the whole-playback average beside it once there is one. */

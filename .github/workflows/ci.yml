@@ -39,6 +39,13 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # The short commit the build came from (a PR's head, not GitHub's merge commit). The player's overlay shows it and
+      # the APK artifact is named after it, so a phone test can tell which build it ran.
+      - name: Name the build
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: echo "BUILD_ID=${SHA::7}" >> "$GITHUB_ENV"
+
       - name: Unit tests (all modules)
         run: ./gradlew testDebugUnitTest test --stacktrace
 
@@ -52,7 +59,7 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
+          name: app-debug-apk-${{ env.BUILD_ID }}
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 7
 

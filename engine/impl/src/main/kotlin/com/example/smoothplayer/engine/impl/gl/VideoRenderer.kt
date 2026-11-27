@@ -22,6 +22,7 @@ import com.example.smoothplayer.engine.impl.interp.MotionFields
 import com.example.smoothplayer.engine.impl.interp.WarpGovernor
 import com.example.smoothplayer.engine.impl.pacer.VsyncPacer
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
+import com.example.smoothplayer.engine.impl.telemetry.InBetweenReason
 import com.example.smoothplayer.engine.impl.telemetry.TraceNames
 import com.example.smoothplayer.engine.impl.telemetry.trace
 import com.example.smoothplayer.engine.impl.threading.GlThread
@@ -85,12 +86,19 @@ private const val QUAD_HALF_EXTENT = 1f
 private const val NANOS_PER_MICRO = 1_000L
 private const val TARGET_REFRESH_HZ = 60f
 private const val NO_PENDING_SLOT = -1
+
+/**
+ * Time a motion search needs before the next vsync to run on arrival: 3.8 ms p50 at 1080p on the vivo, plus the
+ * stats pass and room for a slow pair.
+ */
+private const val SEARCH_ON_ARRIVAL_BUDGET_NS = 8_000_000L
 private const val NO_SLOT = -1
 
 /** How one refresh of [InterpolationMode.MotionCompensated] is drawn. */
 private const val DRAW_PLAIN = 0 // one frame, or the phase is on a frame: nothing to interpolate
 private const val DRAW_WARP = 1
-private const val DRAW_BLEND = 2 // no field for this pair
+private const val DRAW_BLEND = 2 // no field for this pair: never searched
+private const val DRAW_SEARCH_PENDING = 5 // no field yet: its search runs after the next swap
 private const val DRAW_HOLD = 3 // the heat or GPU fallback: show the earlier frame
 private const val DRAW_LOW_CONFIDENCE = 4 // too little has matched lately: blend, but still hold at a scene cut
 
@@ -538,11 +546,22 @@ internal class VideoRenderer(
         }
 
         if (LUMA_PASSES_ENABLED && motionSearch != null) {
-            // Deferred to just after the next swap. Frames arrive shortly before the vsync that shows them, so a search
-            // queued here would sit on the GPU ahead of that vsync's draw and delay the present.
             pendingMotionSlot = slot
             pendingMotionPtsUs = ptsUs
+            // The decoder releases each frame right after a vsync, for the draw at the next one, which is often the
+            // in-between that needs this pair. Searched after that draw's swap, the pair arrived too late and blended
+            // (24% of in-betweens on the vivo). So the search runs now when it finishes well before the next vsync's
+            // draw; otherwise it waits for the swap as before, so it never sits on the GPU ahead of a present.
+            if (searchFitsBeforeNextVsync()) runPendingMotion()
         }
+    }
+
+    /** True when a search queued now ends, with a margin, before the next vsync's draw. False when not pacing. */
+    @GlThread
+    private fun searchFitsBeforeNextVsync(): Boolean {
+        if (!paced) return false
+        val nextVsyncNs = pacer?.nextVsyncNs() ?: return false
+        return nextVsyncNs - System.nanoTime() >= SEARCH_ON_ARRIVAL_BUDGET_NS
     }
 
     /**
@@ -727,7 +746,7 @@ internal class VideoRenderer(
         }
         val decision = decideWarp(frames, pick)
         val inBetween = pick.a != pick.b && pick.t > 0f
-        if (inBetween) telemetry.onInBetweenDraw(warped = decision == DRAW_WARP)
+        if (inBetween) telemetry.onInBetweenDraw(inBetweenReason(decision))
         when {
             decision == DRAW_WARP && inBetween ->
                 drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 1f, view = WARP_VIEW_PICTURE)
@@ -737,6 +756,14 @@ internal class VideoRenderer(
             decision == DRAW_HOLD -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.a), 0f, rotation)
             else -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.b), pick.t, rotation)
         }
+    }
+
+    private fun inBetweenReason(decision: Int): InBetweenReason = when (decision) {
+        DRAW_WARP -> InBetweenReason.Warped
+        DRAW_SEARCH_PENDING -> InBetweenReason.SearchPending
+        DRAW_LOW_CONFIDENCE -> InBetweenReason.LowConfidence
+        DRAW_HOLD -> InBetweenReason.Held
+        else -> InBetweenReason.NotSearched
     }
 
     /**
@@ -753,7 +780,10 @@ internal class VideoRenderer(
         val slotFields = fields ?: return DRAW_BLEND
         val slot = pick.b
         val nextPts = frames.pts(slot)
-        if (!slotFields.holds(slot, frames.pts(pick.a), nextPts)) return DRAW_BLEND
+        if (!slotFields.holds(slot, frames.pts(pick.a), nextPts)) {
+            val pending = pendingMotionSlot == slot && pendingMotionPtsUs == nextPts
+            return if (pending) DRAW_SEARCH_PENDING else DRAW_BLEND
+        }
         return when (governor.fallback) {
             WarpFallback.None -> DRAW_WARP
             WarpFallback.LowConfidence -> DRAW_LOW_CONFIDENCE

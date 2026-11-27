@@ -71,6 +71,12 @@ internal class VsyncPacer(
         lastVsyncNs = 0L
     }
 
+    /**
+     * When the next vsync callback is due, on the System.nanoTime clock, or null when not pacing or before the first
+     * vsync.
+     */
+    fun nextVsyncNs(): Long? = if (running && lastVsyncNs != 0L) lastVsyncNs + periodNs else null
+
     /** Vsync period as last measured. Used for presentation timing and cadence statistics. */
     fun currentPeriodNs(): Long = periodNs
 

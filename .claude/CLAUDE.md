@@ -16,7 +16,7 @@ Phase 1 Steps 1–6 are done. Step 7 (the warp) is in progress. The plan records
 
 - CI (`.github/workflows/ci.yml`) runs unit tests, lint and `assembleDebug` on every PR into `main`. It is the build check.
 - Cloud sessions can't build the app: there's no Android SDK (dl.google.com is blocked), and Gradle's daemon wants JDK 25 from foojay, which is also blocked. Pure-Kotlin code and its tests can be compiled with a standalone `kotlinc`. Shaders can be checked with `glslangValidator`, and compute shaders can run on Mesa llvmpipe (GLES 3.1) through EGL surfaceless.
-- CI uploads the debug APK as the `app-debug-apk` artifact, so a build can be installed from the phone without a PC.
+- CI uploads the debug APK as the `app-debug-apk-<short sha>` artifact (the overlay shows the same build id), so a build can be installed from the phone without a PC.
 - Instrumented tests (`src/androidTest`) run only on a real device: `./gradlew :engine:impl:connectedDebugAndroidTest`.
 
 ## Required reading before writing code

@@ -314,8 +314,6 @@ internal class GpuMotionSearch private constructor(
                 #define CUT_HISTOGRAM_DISTANCE ${cut.cutHistogramDistance}
                 #define CUT_LOW_CONFIDENCE ${cut.cutLowConfidence}
                 #define CUT_HISTOGRAM_ALONE ${cut.cutHistogramAlone}
-                #define CUT_LOW_CONFIDENCE_ALONE ${cut.cutLowConfidenceAlone}
-                #define CUT_LOW_CONFIDENCE_ALONE_HISTOGRAM ${cut.cutLowConfidenceAloneHistogram}
                 #define LOC_PLANE_SIZE $LOC_PLANE_SIZE
                 #define LOC_GRID $LOC_GRID
             """.trimIndent()
