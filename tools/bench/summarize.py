@@ -82,9 +82,19 @@ def summarize(run):
     per_second = [100.0 * int(r["exact_runs"]) / int(r["runs"]) for r in clean if int(r["runs"]) > 0]
     stutters = [num(r, "elapsed_s") for r in clean if int(r["runs"]) > 0
                 and 100.0 * int(r["exact_runs"]) / int(r["runs"]) < STUTTER_SECOND]
-    gaps = [b - a for a, b in zip(stutters, stutters[1:])]
-    # Periodic stutter: stutters keep coming at a steady interval (spread small against the mean gap).
-    periodic = len(gaps) >= 5 and statistics.pstdev(gaps) < 0.25 * statistics.mean(gaps)
+    # Stutter seconds within 2 s of each other are one event. Periodic stutter: most gaps between events are within
+    # 25% of the median gap (a hitch every N seconds), with at least five events.
+    events = []
+    for t in stutters:
+        if not events or t - events[-1][-1] > 2.0:
+            events.append([t])
+        else:
+            events[-1].append(t)
+    starts = [e[0] for e in events]
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    period = statistics.median(gaps) if gaps else None
+    steady = sum(1 for g in gaps if period and abs(g - period) <= 0.25 * period)
+    periodic = len(gaps) >= 5 and steady >= 0.6 * len(gaps)
     dropped = [num(r, "dropped_total") for r in rows]
     drops = (dropped[-1] - dropped[0]) if dropped and None not in (dropped[0], dropped[-1]) else None
 
@@ -131,7 +141,7 @@ def summarize(run):
         "clip": run.meta.get("clip", ""), "size": run.meta.get("size", ""), "label": run.meta.get("label", ""),
         "device": run.meta.get("device", ""), "mode": run.mode, "file": run.path, "duration_s": duration,
         "cadence": cadence, "worst_second": min(per_second) if per_second else None, "stutter_seconds": len(stutters),
-        "periodic_stutter": periodic, "drops": drops, "drift_ms": [num(r, "av_drift_ms") for r in rows if r["av_drift_ms"]],
+        "stutter_events": len(events), "stutter_period_s": period, "periodic_stutter": periodic, "drops": drops, "drift_ms": [num(r, "av_drift_ms") for r in rows if r["av_drift_ms"]],
         "stages": {k: (pct(v, 0.5), pct(v, 0.95), pct(v, 0.99), len(v)) for k, v in stages.items()},
         "total_p50": pct(totals, 0.5), "total_p95": total_p95, "total_p99": pct(totals, 0.99), "window_p95": window_p95,
         "headroom_max": max(headroom) if headroom else None, "status_max": max(status) if status else None,
@@ -181,7 +191,8 @@ def render(summaries):
         lines.append("| Measure | Value |")
         lines.append("|---|---|")
         lines.append(f"| Cadence (outside timing windows) | {fmt(s['cadence'], '%', 1)}, worst second {fmt(s['worst_second'], '%', 0)}, "
-                     f"{s['stutter_seconds']} seconds under {STUTTER_SECOND:.0f}%{', periodic' if s['periodic_stutter'] else ''} |")
+                     f"{s['stutter_seconds']} seconds under {STUTTER_SECOND:.0f}% in {s['stutter_events']} events"
+                     f"{', periodic about every %.0f s' % s['stutter_period_s'] if s['periodic_stutter'] else ''} |")
         lines.append(f"| Dropped frames | {fmt(s['drops'], '', 0)} |")
         if s["drift_ms"]:
             lines.append(f"| A/V drift | {min(s['drift_ms']):.0f} to {max(s['drift_ms']):.0f} ms |")
