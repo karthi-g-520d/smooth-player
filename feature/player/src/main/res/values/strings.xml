@@ -49,6 +49,7 @@
     <string name="player_mode_motion">Mode: motion-compensated</string>
     <string name="player_stats_warp">warp %1$s · in-betweens warped %2$s · scene cuts %3$d</string>
     <string name="player_stats_cpu">GL draw CPU p95 %1$s · stats poll max %2$s</string>
+    <string name="player_stats_in_betweens">since open: warped %1$s · search pending %2$s · not searched %3$s · low conf %4$s · held %5$s</string>
     <string name="player_stats_last_cut">last cut: unmatched %1$.2f · tone change %2$.2f</string>
     <string name="player_warp_on">on</string>
     <string name="player_warp_low_confidence">blend (low confidence)</string>

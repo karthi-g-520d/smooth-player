@@ -22,6 +22,7 @@ import com.example.smoothplayer.engine.impl.interp.MotionFields
 import com.example.smoothplayer.engine.impl.interp.WarpGovernor
 import com.example.smoothplayer.engine.impl.pacer.VsyncPacer
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
+import com.example.smoothplayer.engine.impl.telemetry.InBetweenReason
 import com.example.smoothplayer.engine.impl.telemetry.TraceNames
 import com.example.smoothplayer.engine.impl.telemetry.trace
 import com.example.smoothplayer.engine.impl.threading.GlThread
@@ -90,7 +91,8 @@ private const val NO_SLOT = -1
 /** How one refresh of [InterpolationMode.MotionCompensated] is drawn. */
 private const val DRAW_PLAIN = 0 // one frame, or the phase is on a frame: nothing to interpolate
 private const val DRAW_WARP = 1
-private const val DRAW_BLEND = 2 // no field for this pair
+private const val DRAW_BLEND = 2 // no field for this pair: never searched
+private const val DRAW_SEARCH_PENDING = 5 // no field yet: its search runs after the next swap
 private const val DRAW_HOLD = 3 // the heat or GPU fallback: show the earlier frame
 private const val DRAW_LOW_CONFIDENCE = 4 // too little has matched lately: blend, but still hold at a scene cut
 
@@ -727,7 +729,7 @@ internal class VideoRenderer(
         }
         val decision = decideWarp(frames, pick)
         val inBetween = pick.a != pick.b && pick.t > 0f
-        if (inBetween) telemetry.onInBetweenDraw(warped = decision == DRAW_WARP)
+        if (inBetween) telemetry.onInBetweenDraw(inBetweenReason(decision))
         when {
             decision == DRAW_WARP && inBetween ->
                 drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 1f, view = WARP_VIEW_PICTURE)
@@ -737,6 +739,14 @@ internal class VideoRenderer(
             decision == DRAW_HOLD -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.a), 0f, rotation)
             else -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.b), pick.t, rotation)
         }
+    }
+
+    private fun inBetweenReason(decision: Int): InBetweenReason = when (decision) {
+        DRAW_WARP -> InBetweenReason.Warped
+        DRAW_SEARCH_PENDING -> InBetweenReason.SearchPending
+        DRAW_LOW_CONFIDENCE -> InBetweenReason.LowConfidence
+        DRAW_HOLD -> InBetweenReason.Held
+        else -> InBetweenReason.NotSearched
     }
 
     /**
@@ -753,7 +763,10 @@ internal class VideoRenderer(
         val slotFields = fields ?: return DRAW_BLEND
         val slot = pick.b
         val nextPts = frames.pts(slot)
-        if (!slotFields.holds(slot, frames.pts(pick.a), nextPts)) return DRAW_BLEND
+        if (!slotFields.holds(slot, frames.pts(pick.a), nextPts)) {
+            val pending = pendingMotionSlot == slot && pendingMotionPtsUs == nextPts
+            return if (pending) DRAW_SEARCH_PENDING else DRAW_BLEND
+        }
         return when (governor.fallback) {
             WarpFallback.None -> DRAW_WARP
             WarpFallback.LowConfidence -> DRAW_LOW_CONFIDENCE

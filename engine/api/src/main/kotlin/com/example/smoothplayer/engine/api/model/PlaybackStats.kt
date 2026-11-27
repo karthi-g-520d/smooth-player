@@ -28,6 +28,8 @@ public data class PlaybackStats(
     val warpFallback: WarpFallback? = null,
     /** Percent of in-between refreshes, over the last second, that were drawn with the warp rather than a fallback. */
     val warpPercent: Float? = null,
+    /** Why each in-between refresh was warped or not, since the file opened. Null outside MotionCompensated. */
+    val inBetweens: InBetweenCounts? = null,
     /** Frame pairs since the file opened that were held rather than interpolated, because they span a scene cut. */
     val sceneCuts: Long = 0L,
     /** The last scene cut's share of unmatched textured blocks, 0 to 1. Null before the first cut. */

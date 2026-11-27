@@ -10,6 +10,7 @@ import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.Nanos
 import com.example.smoothplayer.engine.api.model.PlaybackStats
+import com.example.smoothplayer.engine.api.model.InBetweenCounts
 import com.example.smoothplayer.engine.api.model.WarpFallback
 import java.io.File
 
@@ -59,6 +60,7 @@ internal class FrameTelemetry(
     // The warp, from the GL thread: in-between refreshes drawn and how many were warped, scene cuts, the fallback.
     private var windowInBetween = 0L
     private var windowWarped = 0L
+    private val totalInBetweens = LongArray(InBetweenReason.entries.size)
     private var totalSceneCuts = 0L
     private var lastCutLowConfidence: Float? = null
     private var lastCutHistogram: Float? = null
@@ -112,6 +114,7 @@ internal class FrameTelemetry(
             totalExactRuns = 0L
             windowInBetween = 0L
             windowWarped = 0L
+            totalInBetweens.fill(0L)
             totalSceneCuts = 0L
             lastCutLowConfidence = null
             lastCutHistogram = null
@@ -203,14 +206,12 @@ internal class FrameTelemetry(
         }
     }
 
-    /**
-     * Records one in-between refresh of the motion-compensated mode: [warped] when the warp drew it, false when a
-     * fallback did. Called on the GL thread.
-     */
-    fun onInBetweenDraw(warped: Boolean) {
+    /** Records one in-between refresh of the motion-compensated mode and how it was drawn. Called on the GL thread. */
+    fun onInBetweenDraw(reason: InBetweenReason) {
         synchronized(lock) {
             windowInBetween++
-            if (warped) windowWarped++
+            if (reason == InBetweenReason.Warped) windowWarped++
+            totalInBetweens[reason.ordinal]++
         }
     }
 
@@ -307,6 +308,7 @@ internal class FrameTelemetry(
             logPath = logFile?.path,
             warpFallback = warpFallback,
             warpPercent = if (warpFallback != null && windowInBetween > 0L) windowWarped * PERCENT / windowInBetween else null,
+            inBetweens = if (warpFallback != null) inBetweenCounts() else null,
             sceneCuts = totalSceneCuts,
             lastCutLowConfidence = lastCutLowConfidence,
             lastCutHistogram = lastCutHistogram,
@@ -315,6 +317,14 @@ internal class FrameTelemetry(
         )
     }
 
+
+    private fun inBetweenCounts(): InBetweenCounts = InBetweenCounts(
+        warped = totalInBetweens[InBetweenReason.Warped.ordinal],
+        searchPending = totalInBetweens[InBetweenReason.SearchPending.ordinal],
+        notSearched = totalInBetweens[InBetweenReason.NotSearched.ordinal],
+        lowConfidence = totalInBetweens[InBetweenReason.LowConfidence.ordinal],
+        held = totalInBetweens[InBetweenReason.Held.ordinal],
+    )
 
     private fun refreshHz(): Float {
         val display = context.getSystemService(DisplayManager::class.java)
@@ -370,3 +380,6 @@ internal fun percentile(sorted: LongArray, fraction: Double): Long? {
     val rank = kotlin.math.ceil(fraction * sorted.size).toInt().coerceIn(1, sorted.size)
     return sorted[rank - 1]
 }
+
+/** How one in-between refresh of the motion-compensated mode was drawn (see [InBetweenCounts]). */
+internal enum class InBetweenReason { Warped, SearchPending, NotSearched, LowConfidence, Held }
