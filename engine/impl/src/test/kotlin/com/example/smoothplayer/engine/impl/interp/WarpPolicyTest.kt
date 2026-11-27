@@ -69,9 +69,9 @@ class WarpPolicyTest {
     }
 
     @Test
-    fun `nothing matching with some change in tones is a cut`() {
-        assertTrue(isSceneCut(PairStats(lowConfidenceFraction = 0.9f, histogramDistance = 0.3f)))
-        assertFalse(isSceneCut(PairStats(lowConfidenceFraction = 0.9f, histogramDistance = 0.2f)))
+    fun `nothing matching with a small change in tones is not a cut, as fast motion on the phone's racing clip`() {
+        assertFalse(isSceneCut(PairStats(lowConfidenceFraction = 0.83f, histogramDistance = 0.41f)))
+        assertTrue(isSceneCut(PairStats(lowConfidenceFraction = 0.83f, histogramDistance = 0.5f)))
     }
 
     @Test

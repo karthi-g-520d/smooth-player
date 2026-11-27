@@ -86,6 +86,12 @@ private const val QUAD_HALF_EXTENT = 1f
 private const val NANOS_PER_MICRO = 1_000L
 private const val TARGET_REFRESH_HZ = 60f
 private const val NO_PENDING_SLOT = -1
+
+/**
+ * Time a motion search needs before the next vsync to run on arrival: 3.8 ms p50 at 1080p on the vivo, plus the
+ * stats pass and room for a slow pair.
+ */
+private const val SEARCH_ON_ARRIVAL_BUDGET_NS = 8_000_000L
 private const val NO_SLOT = -1
 
 /** How one refresh of [InterpolationMode.MotionCompensated] is drawn. */
@@ -540,11 +546,22 @@ internal class VideoRenderer(
         }
 
         if (LUMA_PASSES_ENABLED && motionSearch != null) {
-            // Deferred to just after the next swap. Frames arrive shortly before the vsync that shows them, so a search
-            // queued here would sit on the GPU ahead of that vsync's draw and delay the present.
             pendingMotionSlot = slot
             pendingMotionPtsUs = ptsUs
+            // The decoder releases each frame right after a vsync, for the draw at the next one, which is often the
+            // in-between that needs this pair. Searched after that draw's swap, the pair arrived too late and blended
+            // (24% of in-betweens on the vivo). So the search runs now when it finishes well before the next vsync's
+            // draw; otherwise it waits for the swap as before, so it never sits on the GPU ahead of a present.
+            if (searchFitsBeforeNextVsync()) runPendingMotion()
         }
+    }
+
+    /** True when a search queued now ends, with a margin, before the next vsync's draw. False when not pacing. */
+    @GlThread
+    private fun searchFitsBeforeNextVsync(): Boolean {
+        if (!paced) return false
+        val nextVsyncNs = pacer?.nextVsyncNs() ?: return false
+        return nextVsyncNs - System.nanoTime() >= SEARCH_ON_ARRIVAL_BUDGET_NS
     }
 
     /**
