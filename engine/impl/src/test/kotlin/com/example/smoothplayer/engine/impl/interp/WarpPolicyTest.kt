@@ -55,6 +55,12 @@ class WarpPolicyTest {
     }
 
     @Test
+    fun `fast motion into a lighting change is not a cut, as on the phone's racing clip`() {
+        assertFalse(isSceneCut(PairStats(lowConfidenceFraction = 0.61f, histogramDistance = 0.81f)))
+        assertTrue(isSceneCut(PairStats(lowConfidenceFraction = 0.75f, histogramDistance = 0.81f)))
+    }
+
+    @Test
     fun `nothing matching with the same tones is not a cut, so fast motion beyond the search is not held`() {
         // Measured: low-confidence 0.95, histogram distance 0.12. It falls to the per-pixel confidence instead.
         val stats = statsOf(plane { x, y -> texture(x, y) }, plane { x, y -> texture(x + OTHER_SHOT, y + OTHER_SHOT) })

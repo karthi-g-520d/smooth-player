@@ -50,9 +50,13 @@ internal data class PairStats(val lowConfidenceFraction: Float, val histogramDis
  * WarpPolicyTest); the plan asks for calibration on real scene-cut clips.
  */
 internal data class WarpPolicyConfig(
-    /** A cut usually changes both the histogram and the matches; a pan changes neither, much. */
+    /**
+     * A cut usually changes both the histogram and the matches; a pan changes neither, much. The match share was 0.5
+     * at first, but a racing clip with no cuts had a pair at 0.61 unmatched and 0.81 tone change (fast motion into a
+     * lighting change, phone run of 2026-11-27); a real cut leaves almost nothing matched.
+     */
     val cutHistogramDistance: Float = 0.5f,
-    val cutLowConfidence: Float = 0.5f,
+    val cutLowConfidence: Float = 0.7f,
     /** A histogram change this large is a cut on its own, even where the search found something to match. */
     val cutHistogramAlone: Float = 1.0f,
     /**
