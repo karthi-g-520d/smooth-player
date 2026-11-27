@@ -98,18 +98,18 @@ class WarpPolicyTest {
     }
 
     @Test
-    fun `heat holds frames at 0_9 headroom and lets go below 0_8 once the hold has passed`() {
+    fun `heat holds frames at 1_0 headroom and lets go below 0_95 once the hold has passed`() {
         val governor = WarpGovernor()
-        governor.onThermal(0.85f, 0L)
-        assertEquals(WarpFallback.None, governor.fallback)
-        governor.onThermal(0.9f, SECOND)
+        governor.onThermal(0.97f, 0L)
+        assertEquals("the vivo's normal level must not trigger it", WarpFallback.None, governor.fallback)
+        governor.onThermal(1.0f, SECOND)
         assertEquals(WarpFallback.Thermal, governor.fallback)
         assertTrue(governor.holdsFrames)
-        governor.onThermal(0.7f, 2 * SECOND)
+        governor.onThermal(0.9f, 2 * SECOND)
         assertEquals("too soon after the fallback started", WarpFallback.Thermal, governor.fallback)
-        governor.onThermal(0.85f, 10 * SECOND)
+        governor.onThermal(0.96f, 10 * SECOND)
         assertEquals("not yet cool enough", WarpFallback.Thermal, governor.fallback)
-        governor.onThermal(0.79f, 11 * SECOND)
+        governor.onThermal(0.94f, 11 * SECOND)
         assertEquals(WarpFallback.None, governor.fallback)
         governor.onThermal(null, 12 * SECOND)
         assertEquals(WarpFallback.None, governor.fallback)
@@ -139,7 +139,7 @@ class WarpPolicyTest {
         repeat(2) { governor.onPair(PairStats(0.9f, 0f)) }
         governor.onPresentGpu(50 * MS, 0L)
         assertEquals(WarpFallback.GpuBudget, governor.fallback)
-        governor.onThermal(0.95f, 0L)
+        governor.onThermal(1.05f, 0L)
         assertEquals(WarpFallback.Thermal, governor.fallback)
         governor.reset()
         assertEquals(WarpFallback.None, governor.fallback)

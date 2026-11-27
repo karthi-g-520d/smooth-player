@@ -20,7 +20,6 @@ import com.example.smoothplayer.engine.impl.clock.MasterClock
 import com.example.smoothplayer.engine.impl.interp.GpuMotionSearch
 import com.example.smoothplayer.engine.impl.interp.MotionFields
 import com.example.smoothplayer.engine.impl.interp.WarpGovernor
-import com.example.smoothplayer.engine.impl.interp.isSceneCut
 import com.example.smoothplayer.engine.impl.pacer.VsyncPacer
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
 import com.example.smoothplayer.engine.impl.telemetry.TraceNames
@@ -65,6 +64,8 @@ private const val UNIFORM_WARP_DEBUG_VIEW = 10
 private const val WARP_VIEW_PICTURE = 0
 private const val WARP_VIEW_CONFIDENCE = 1
 private const val FIELD_TEXTURE_UNIT = 2
+/** The phase the confidence view uses when only one frame is on screen. */
+private const val HALF_PHASE = 0.5f
 private const val MOTION_VIEW_VECTORS = 1
 private const val MOTION_VIEW_MATCH_ERROR = 2
 /** The residual the match-error view shows as fully red: a best-match SAD as large as the block's own detail. */
@@ -678,8 +679,7 @@ internal class VideoRenderer(
                 }
             }
             DebugView.WarpConfidence -> if (fields != null) {
-                drawWarp(frames, pick, rotation, weight = if (decideWarp(frames, pick) == DRAW_WARP) 1f else 0f,
-                    view = WARP_VIEW_CONFIDENCE)
+                drawConfidenceView(frames, pick, rotation)
                 return
             }
             DebugView.Off -> Unit
@@ -692,7 +692,8 @@ internal class VideoRenderer(
         val inBetween = pick.a != pick.b && pick.t > 0f
         if (inBetween) telemetry.onInBetweenDraw(warped = decision == DRAW_WARP)
         when {
-            decision == DRAW_WARP && inBetween -> drawWarp(frames, pick, rotation, weight = 1f, view = WARP_VIEW_PICTURE)
+            decision == DRAW_WARP && inBetween ->
+                drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 1f, view = WARP_VIEW_PICTURE)
             decision == DRAW_HOLD -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.a), 0f, rotation)
             else -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.b), pick.t, rotation)
         }
@@ -714,10 +715,9 @@ internal class VideoRenderer(
         if (!slotFields.statsReady(slot)) return DRAW_BLEND
         if (nextPts != accountedPairPtsUs) {
             accountedPairPtsUs = nextPts
-            val stats = slotFields.stats(slot)
-            accountedPairIsCut = isSceneCut(stats)
+            accountedPairIsCut = slotFields.isCut(slot)
             // A cut is one pair, not a trend, so it does not move the low-confidence fallback.
-            if (accountedPairIsCut) telemetry.onSceneCut() else governor.onPair(stats)
+            if (accountedPairIsCut) telemetry.onSceneCut() else governor.onPair(slotFields.stats(slot))
         }
         if (accountedPairIsCut) return DRAW_HOLD
         return when (governor.fallback) {
@@ -771,22 +771,39 @@ internal class VideoRenderer(
     }
 
     /**
+     * The warp's per-pixel confidence for the pair on screen, in any mode. When only one frame is on screen (Duplicate
+     * mode, or a refresh that lands on a frame), it shows the pair that ends at that frame, halfway. The whole-picture
+     * fallbacks (heat, GPU budget, low confidence) are left out, so the view always shows what the field can do; only a
+     * pair without a finished field, or a scene cut, shows all red.
+     */
+    @GlThread
+    private fun drawConfidenceView(frames: FrameRing, pick: BlendPick, rotation: Int) {
+        val slotFields = checkNotNull(fields)
+        val paired = pick.a != pick.b
+        val b = pick.b
+        val a = if (paired) pick.a else frames.previous(b)
+        val t = if (paired) pick.t else HALF_PHASE
+        val trusted = slotFields.holds(b, frames.pts(a), frames.pts(b)) && slotFields.statsReady(b) && !slotFields.isCut(b)
+        drawWarp(frames, a, b, t, rotation, weight = if (trusted) 1f else 0f, view = WARP_VIEW_CONFIDENCE)
+    }
+
+    /**
      * The motion-compensated frame at [pick]'s phase, from the field of its newer slot (see warp.frag). [weight] 0
      * makes it the plain blend, which the confidence view uses to show a pair the warp does not draw.
      */
     @GlThread
-    private fun drawWarp(frames: FrameRing, pick: BlendPick, rotation: Int, weight: Float, view: Int) {
+    private fun drawWarp(frames: FrameRing, a: Int, b: Int, t: Float, rotation: Int, weight: Float, view: Int) {
         val slotFields = checkNotNull(fields)
         val divisor = frames.motionLumaDivisor.toFloat()
         val blockSource = divisor * GpuMotionSearch.BLOCK_SIDE
         GLES30.glUseProgram(warpProgram)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.a))
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(a))
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(pick.b))
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(b))
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + FIELD_TEXTURE_UNIT)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slotFields.texture(pick.b))
-        GLES30.glUniform1f(UNIFORM_WARP_T, pick.t)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slotFields.texture(b))
+        GLES30.glUniform1f(UNIFORM_WARP_T, t)
         GLES30.glUniform2f(UNIFORM_LUMA_TO_UV, divisor / frames.width, divisor / frames.height)
         GLES30.glUniform2f(
             UNIFORM_FIELD_SCALE,

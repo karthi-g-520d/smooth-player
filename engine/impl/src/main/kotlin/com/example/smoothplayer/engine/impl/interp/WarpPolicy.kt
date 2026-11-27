@@ -65,9 +65,13 @@ internal data class WarpPolicyConfig(
     val lowConfidenceExit: Float = 0.30f,
     val lowConfidenceEnterPairs: Int = 2,
     val lowConfidenceExitPairs: Int = 8,
-    /** The plan's "thermal headroom >= 0.9: duplicate". Back to the warp below [thermalExit]. */
-    val thermalEnter: Float = 0.9f,
-    val thermalExit: Float = 0.8f,
+    /**
+     * Thermal headroom at which the warp gives way to held frames, and below which it comes back. The plan said 0.9,
+     * but the vivo V2334 sits at 0.95 even in plain Duplicate playback, so 0.9 would never let the warp run there. 1.0
+     * is where Android forecasts severe throttling.
+     */
+    val thermalEnter: Float = 1.0f,
+    val thermalExit: Float = 0.95f,
     /**
      * Present GPU time, smoothed, above which the warp is over budget. The plan's budget is 10 ms per presented frame
      * for the whole pipeline, and motion search takes about 4 ms of it on the vivo.

@@ -29,6 +29,7 @@ internal class MotionFields(slotCount: Int, val columns: Int, val rows: Int) : A
     private val ready = BooleanArray(slotCount)
     private val lowConfidence = FloatArray(slotCount)
     private val histogram = FloatArray(slotCount)
+    private val cut = BooleanArray(slotCount)
 
     init {
         GLES30.glGenTextures(slotCount, textures, 0)
@@ -100,6 +101,9 @@ internal class MotionFields(slotCount: Int, val columns: Int, val rows: Int) : A
         return ready[slot]
     }
 
+    /** True when [slot]'s pair spans a scene cut (see [isSceneCut]). Only valid once [statsReady] is true. */
+    fun isCut(slot: Int): Boolean = cut[slot]
+
     /** The stats of [slot]'s pair. Only valid once [statsReady] is true. Allocates, so call it once per pair. */
     fun stats(slot: Int): PairStats = PairStats(lowConfidence[slot], histogram[slot])
 
@@ -123,6 +127,7 @@ internal class MotionFields(slotCount: Int, val columns: Int, val rows: Int) : A
             )
             lowConfidence[slot] = counts.lowConfidenceFraction
             histogram[slot] = counts.histogramDistance
+            cut[slot] = isSceneCut(counts)
             GLES30.glUnmapBuffer(GLES31.GL_SHADER_STORAGE_BUFFER)
         }
         GLES30.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
