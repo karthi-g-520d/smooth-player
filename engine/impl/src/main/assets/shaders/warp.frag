@@ -10,11 +10,14 @@
 //     little detail, so their residual is high and they blend, where the blend looks the same anyway;
 //   - the two warped samples agreeing: where cA and cB differ, the pixel is covered or uncovered between the frames,
 //     or the vector is wrong, so it blends instead of tearing;
-//   - u_weight, the whole-picture switch the renderer sets (0 when the warp is not trusted for this pair).
+//   - u_weight, the whole-picture switch the renderer sets (0 for the low-confidence fallback, which blends).
+// A pair the stats pass judged a scene cut (u_verdict 0) shows frame A unchanged, since blending two shots is worse
+// than holding one. The verdict comes from the GPU, so the warp never waits for the CPU to read the stats.
 // A warped sample that lands outside its frame is dropped and the other side is used alone, so content entering at an
 // edge is not smeared from the clamped border.
 //
 // IN : u_frameA, u_frameB (RGBA8 ring slots), u_field (RGBA16F, x, y = vector in motion-luma pixels, z = residual),
+//      u_verdict (binding 3, 1x1 R32F: 1 = interpolate, 0 = scene cut),
 //      u_t (location 6), u_lumaToUv (one motion-luma pixel in frame UV, location 7), u_fieldScale (frame UV to field
 //      UV, location 8), u_weight (location 9), u_debugView (location 10), v_uv
 // OUT: o_color
@@ -23,6 +26,7 @@ precision mediump float;
 layout(binding = 0) uniform mediump sampler2D u_frameA;
 layout(binding = 1) uniform mediump sampler2D u_frameB;
 layout(binding = 2) uniform highp sampler2D u_field;
+layout(binding = 3) uniform highp sampler2D u_verdict;
 layout(location = 6) uniform highp float u_t;
 layout(location = 7) uniform highp vec2 u_lumaToUv;
 layout(location = 8) uniform highp vec2 u_fieldScale;
@@ -68,7 +72,9 @@ void main() {
     mediump float agreement = (aIn && bIn) ? 1.0 - smoothstep(DISAGREE_LOW, DISAGREE_HIGH, disagree) : 1.0;
     mediump float confidence = wSum > 0.0 ? blockConfidence * agreement * u_weight : 0.0;
 
-    vec4 color = mix(fallback, warped, confidence);
+    bool sceneCut = texelFetch(u_verdict, ivec2(0), 0).r < 0.5;
+    if (sceneCut) confidence = 0.0;
+    vec4 color = sceneCut ? texture(u_frameA, v_uv) : mix(fallback, warped, confidence);
     if (u_debugView == 1) {
         mediump vec3 grey = vec3(dot(color.rgb, LUMA_WEIGHTS) * DEBUG_GREY);
         color = vec4(mix(grey, vec3(1.0 - confidence, confidence, 0.0), DEBUG_TINT), 1.0);

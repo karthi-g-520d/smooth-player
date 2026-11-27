@@ -30,6 +30,7 @@ private const val BINDING_FILTERED_FIELD = 1
 private const val BINDING_COARSE_FIELD = 2
 private const val BINDING_STATS = 3
 private const val BINDING_MOTION_IMAGE = 0
+private const val BINDING_VERDICT_IMAGE = 1
 private const val LOC_PLANE_SIZE = 0
 private const val LOC_GRID = 1
 
@@ -78,7 +79,8 @@ internal class GpuMotionSearch private constructor(
      * [fieldTexture] for later GL commands, and in [readBack] for the CPU. [fieldTexture] must be an immutable RGBA16F
      * texture of [columnsFor] by [rowsFor] texels. With a [statsBuffer] (an SSBO of [STATS_BYTES]), the stats pass
      * writes the pair's stats there as four uints: textured blocks, low-confidence textured blocks, histogram pixels,
-     * histogram difference.
+     * histogram difference, and its scene-cut verdict to [verdictTexture] (an immutable 1x1 R32F texture: 1 when the
+     * pair may be interpolated, 0 for a cut). The two go together.
      */
     fun run(
         prevLuma: Int,
@@ -89,7 +91,9 @@ internal class GpuMotionSearch private constructor(
         height: Int,
         fieldTexture: Int = 0,
         statsBuffer: Int = 0,
+        verdictTexture: Int = 0,
     ) {
+        require((statsBuffer == 0) == (verdictTexture == 0)) { "The stats buffer and verdict texture go together" }
         ensureSize(width, height)
         val target = if (fieldTexture != 0) fieldTexture else motionTexture
 
@@ -126,12 +130,16 @@ internal class GpuMotionSearch private constructor(
             GLES31.glUseProgram(statsProgram)
             bindLuma(prevLuma, nextLuma)
             GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_STATS, statsBuffer)
+            GLES31.glBindImageTexture(
+                BINDING_VERDICT_IMAGE, verdictTexture, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_R32F,
+            )
             GLES31.glUniform2i(LOC_PLANE_SIZE, width, height)
             GLES31.glUniform2i(LOC_GRID, columns, rows)
             GLES31.glDispatchCompute(1, 1, 1)
-            // The CPU maps the buffer once a fence after this pass has signalled.
-            GLES31.glMemoryBarrier(GLES31.GL_BUFFER_UPDATE_BARRIER_BIT)
+            // The warp samples the verdict; the CPU maps the buffer once a fence after this pass has signalled.
+            GLES31.glMemoryBarrier(GLES31.GL_TEXTURE_FETCH_BARRIER_BIT or GLES31.GL_BUFFER_UPDATE_BARRIER_BIT)
             GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, BINDING_STATS, 0)
+            GLES31.glBindImageTexture(BINDING_VERDICT_IMAGE, 0, 0, false, 0, GLES31.GL_WRITE_ONLY, GLES31.GL_R32F)
         }
 
         // Nothing is left bound for the passes that follow.
@@ -271,6 +279,7 @@ internal class GpuMotionSearch private constructor(
         private fun defines(config: MotionSearchConfig): String {
             val coarseCandidates = (2 * config.coarseRange + 1) * (2 * config.coarseRange + 1)
             val refineCandidates = (2 * config.refineRange + 1) * (2 * config.refineRange + 1)
+            val cut = WarpPolicyConfig()
             val candidateBits = UINT_BITS - Integer.numberOfLeadingZeros(maxOf(coarseCandidates, refineCandidates) - 1)
             // Each pass packs (cost, candidate index) into one uint, so its largest cost must fit above the index.
             val maxCoarseCost = config.coarseBlockSize * config.coarseBlockSize * MAX_LUMA +
@@ -301,6 +310,12 @@ internal class GpuMotionSearch private constructor(
                 #define BINDING_FILTERED_FIELD $BINDING_FILTERED_FIELD
                 #define BINDING_COARSE_FIELD $BINDING_COARSE_FIELD
                 #define BINDING_MOTION_IMAGE $BINDING_MOTION_IMAGE
+                #define BINDING_VERDICT_IMAGE $BINDING_VERDICT_IMAGE
+                #define CUT_HISTOGRAM_DISTANCE ${cut.cutHistogramDistance}
+                #define CUT_LOW_CONFIDENCE ${cut.cutLowConfidence}
+                #define CUT_HISTOGRAM_ALONE ${cut.cutHistogramAlone}
+                #define CUT_LOW_CONFIDENCE_ALONE ${cut.cutLowConfidenceAlone}
+                #define CUT_LOW_CONFIDENCE_ALONE_HISTOGRAM ${cut.cutLowConfidenceAloneHistogram}
                 #define LOC_PLANE_SIZE $LOC_PLANE_SIZE
                 #define LOC_GRID $LOC_GRID
             """.trimIndent()

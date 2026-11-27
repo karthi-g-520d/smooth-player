@@ -64,6 +64,7 @@ private const val UNIFORM_WARP_DEBUG_VIEW = 10
 private const val WARP_VIEW_PICTURE = 0
 private const val WARP_VIEW_CONFIDENCE = 1
 private const val FIELD_TEXTURE_UNIT = 2
+private const val VERDICT_TEXTURE_UNIT = 3
 /** The phase the confidence view uses when only one frame is on screen. */
 private const val HALF_PHASE = 0.5f
 private const val MOTION_VIEW_VECTORS = 1
@@ -89,8 +90,9 @@ private const val NO_SLOT = -1
 /** How one refresh of [InterpolationMode.MotionCompensated] is drawn. */
 private const val DRAW_PLAIN = 0 // one frame, or the phase is on a frame: nothing to interpolate
 private const val DRAW_WARP = 1
-private const val DRAW_BLEND = 2 // no trusted field for this pair, or too little of it matched
-private const val DRAW_HOLD = 3 // a scene cut, or the heat or GPU fallback: show the earlier frame
+private const val DRAW_BLEND = 2 // no field for this pair
+private const val DRAW_HOLD = 3 // the heat or GPU fallback: show the earlier frame
+private const val DRAW_LOW_CONFIDENCE = 4 // too little has matched lately: blend, but still hold at a scene cut
 
 /**
  * Diagnostic switch for the GPU present timer. Turning it off removes the per-draw timer query and its
@@ -223,9 +225,6 @@ internal class VideoRenderer(
     // One motion field per ring slot, so every pair in the ring keeps its own vectors. Null without motion search.
     private var fields: MotionFields? = null
     private val governor = WarpGovernor()
-    // The newer frame of the last pair whose stats were taken, so each pair counts once, and whether it was a cut.
-    private var accountedPairPtsUs = EMPTY_SLOT_PTS_US
-    private var accountedPairIsCut = false
     private val onPresentGpu: (Nanos) -> Unit = { duration ->
         telemetry.onPresentGpu(duration)
         governor.onPresentGpu(duration.value, System.nanoTime())
@@ -590,6 +589,7 @@ internal class VideoRenderer(
                     frames.fineHeight,
                     fieldTexture = slotFields.texture(slot),
                     statsBuffer = slotFields.statsBuffer(slot),
+                    verdictTexture = slotFields.verdictTexture(slot),
                 )
             }
             val timers = motionTimers
@@ -615,13 +615,26 @@ internal class VideoRenderer(
                 frames.slotCount,
                 GpuMotionSearch.columnsFor(frames.fineWidth),
                 GpuMotionSearch.rowsFor(frames.fineHeight),
+                sharedContextOrNull(),
                 telemetry::onStatsPoll,
             )
         }
         governor.reset()
-        accountedPairPtsUs = EMPTY_SLOT_PTS_US
         return frames
     }
+
+    /**
+     * A context for the stats reader, or null when the driver refuses a second one. The warp then still runs, and
+     * still holds frames at scene cuts, but the low-confidence fallback and the cut count go quiet.
+     */
+    @GlThread
+    private fun sharedContextOrNull(): SharedEglContext? =
+        try {
+            core?.createSharedContext()
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "no shared context, pair stats off", e)
+            null
+        }
 
     /**
      * Draws the chosen frames to the window. Viewport, clear and framebuffer are set here, so no state from a copy
@@ -655,9 +668,29 @@ internal class VideoRenderer(
         telemetry.onDrawCpu(System.nanoTime() - drawStartNs)
 
         trace(TraceNames.GL_SWAP) { eglCore.swapBuffers(target, presentNs) }
-        // Stats first: reading them before the next search is queued keeps the read from waiting on that search.
-        fields?.harvest()
         runPendingMotion()
+        accountPairs()
+    }
+
+    /**
+     * Feeds the stats the worker has read since the last call to the low-confidence fallback and the overlay. Never
+     * waits. A cut is one pair, not a trend, so it does not move the fallback. Pairs read in another mode are
+     * dropped, so Blend playback counts no cuts.
+     */
+    @GlThread
+    private fun accountPairs() {
+        val slotFields = fields ?: return
+        while (true) {
+            val slot = slotFields.takeReadSlot()
+            if (slot < 0) return
+            if (mode != InterpolationMode.MotionCompensated) continue
+            val stats = slotFields.stats(slot)
+            if (slotFields.isCut(slot)) {
+                telemetry.onSceneCut(stats.lowConfidenceFraction, stats.histogramDistance)
+            } else {
+                governor.onPair(stats)
+            }
+        }
     }
 
     /** Forgets every field and the fallback state, after a seek. */
@@ -667,7 +700,6 @@ internal class VideoRenderer(
         fields?.invalidateAll()
         pendingMotionSlot = NO_PENDING_SLOT
         governor.reset()
-        accountedPairPtsUs = EMPTY_SLOT_PTS_US
     }
 
     /** The normal picture in the chosen mode, or the chosen diagnostic view. */
@@ -699,6 +731,9 @@ internal class VideoRenderer(
         when {
             decision == DRAW_WARP && inBetween ->
                 drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 1f, view = WARP_VIEW_PICTURE)
+            // Still through the warp, at weight 0, so a scene cut holds its frame instead of blending two shots.
+            decision == DRAW_LOW_CONFIDENCE && inBetween ->
+                drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 0f, view = WARP_VIEW_PICTURE)
             decision == DRAW_HOLD -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.a), 0f, rotation)
             else -> drawBlend(frames.frameTexture(pick.a), frames.frameTexture(pick.b), pick.t, rotation)
         }
@@ -706,8 +741,10 @@ internal class VideoRenderer(
 
     /**
      * How [pick] is drawn in the motion-compensated mode. The heat and GPU fallbacks come first, since they stop the
-     * search. Then the pair needs its own field, finished on the GPU; until then it blends, as Blend mode does. A scene
-     * cut holds the earlier frame, and too many low-confidence pairs in a row blend.
+     * search. Then the pair needs its own field; without one it blends, as Blend mode does. The search is queued
+     * before any draw of its pair, so the GPU runs it first, and the scene-cut verdict comes with it: warp.frag holds
+     * the earlier frame for a cut. Too many low-confidence pairs in a row blend. Nothing here waits for the CPU to
+     * read the pair's stats.
      */
     @GlThread
     private fun decideWarp(frames: FrameRing, pick: BlendPick): Int {
@@ -717,22 +754,9 @@ internal class VideoRenderer(
         val slot = pick.b
         val nextPts = frames.pts(slot)
         if (!slotFields.holds(slot, frames.pts(pick.a), nextPts)) return DRAW_BLEND
-        if (!slotFields.statsReady(slot)) return DRAW_BLEND
-        if (nextPts != accountedPairPtsUs) {
-            accountedPairPtsUs = nextPts
-            accountedPairIsCut = slotFields.isCut(slot)
-            // A cut is one pair, not a trend, so it does not move the low-confidence fallback.
-            val stats = slotFields.stats(slot)
-            if (accountedPairIsCut) {
-                telemetry.onSceneCut(stats.lowConfidenceFraction, stats.histogramDistance)
-            } else {
-                governor.onPair(stats)
-            }
-        }
-        if (accountedPairIsCut) return DRAW_HOLD
         return when (governor.fallback) {
             WarpFallback.None -> DRAW_WARP
-            WarpFallback.LowConfidence -> DRAW_BLEND
+            WarpFallback.LowConfidence -> DRAW_LOW_CONFIDENCE
             WarpFallback.Thermal, WarpFallback.GpuBudget -> DRAW_HOLD
         }
     }
@@ -793,7 +817,8 @@ internal class VideoRenderer(
         val b = pick.b
         val a = if (paired) pick.a else frames.previous(b)
         val t = if (paired) pick.t else HALF_PHASE
-        val trusted = slotFields.holds(b, frames.pts(a), frames.pts(b)) && slotFields.statsReady(b) && !slotFields.isCut(b)
+        // A scene cut shows all red too: warp.frag reads the GPU's verdict.
+        val trusted = slotFields.holds(b, frames.pts(a), frames.pts(b))
         drawWarp(frames, a, b, t, rotation, weight = if (trusted) 1f else 0f, view = WARP_VIEW_CONFIDENCE)
     }
 
@@ -813,6 +838,8 @@ internal class VideoRenderer(
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.frameTexture(b))
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + FIELD_TEXTURE_UNIT)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slotFields.texture(b))
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + VERDICT_TEXTURE_UNIT)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slotFields.verdictTexture(b))
         GLES30.glUniform1f(UNIFORM_WARP_T, t)
         GLES30.glUniform2f(UNIFORM_LUMA_TO_UV, divisor / frames.width, divisor / frames.height)
         GLES30.glUniform2f(
