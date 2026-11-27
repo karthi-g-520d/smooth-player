@@ -11,6 +11,7 @@ import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.Nanos
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.InBetweenCounts
+import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.WarpFallback
 import java.io.File
 
@@ -34,6 +35,11 @@ private class GpuSamples {
 
     /** The valid samples in ascending order. Copying here keeps the ring writable while the stats are computed. */
     fun sorted(): LongArray = samplesNs.copyOf(count).also { it.sort() }
+
+    fun clear() {
+        count = 0
+        next = 0
+    }
 }
 
 /**
@@ -92,6 +98,16 @@ internal class FrameTelemetry(
     private val drawCpu = GpuSamples()
     private var windowStatsPollMaxNs = 0L
 
+    // Step 8 benchmark run: the per-second log, the stage-timing schedule, and this second's stage samples.
+    private val deviceVitals = DeviceVitals(context)
+    @Volatile private var mode = InterpolationMode.Duplicate
+    private var bench: BenchLog? = null
+    private var benchStartNs = 0L
+    private var probe: StageProbeSchedule? = null
+    private val windowInBetweens = LongArray(InBetweenReason.entries.size)
+    private val windowStageNs = LongArray(PipelineStage.entries.size) { NO_SAMPLE }
+    private val stageSamples = Array(PipelineStage.entries.size) { GpuSamples() }
+
     /** Clears the per-playback counters. A log file that is already open keeps writing. */
     fun reset(masterIsAudio: Boolean) {
         synchronized(lock) {
@@ -114,6 +130,7 @@ internal class FrameTelemetry(
             totalExactRuns = 0L
             windowInBetween = 0L
             windowWarped = 0L
+            windowInBetweens.fill(0L)
             totalInBetweens.fill(0L)
             totalSceneCuts = 0L
             lastCutLowConfidence = null
@@ -135,6 +152,10 @@ internal class FrameTelemetry(
         rendered: Boolean,
         releaseNs: Long,
     ) {
+        // The battery and screen readings are binder calls, so they are made before taking the lock the GL thread
+        // shares. windowStartNs is read unlocked: a stale value costs at most one extra or one late reading.
+        val windowStart = windowStartNs
+        val vitals = if (windowStart != null && releaseNs - windowStart >= WINDOW_NS) deviceVitals.read() else null
         synchronized(lock) {
             frameIndex++
             if (rendered) {
@@ -156,7 +177,7 @@ internal class FrameTelemetry(
                 }
                 windowDraws = 0L
                 windowUnknownDraws = 0L
-                publish(snapshotLocked(releaseNs))
+                publish(snapshotLocked(releaseNs, vitals ?: deviceVitals.read()))
                 windowStartNs = releaseNs
                 windowRendered = 0L
                 windowFirstPtsUs = 0L
@@ -166,6 +187,8 @@ internal class FrameTelemetry(
                 windowInBetween = 0L
                 windowWarped = 0L
                 windowStatsPollMaxNs = 0L
+                windowInBetweens.fill(0L)
+                windowStageNs.fill(NO_SAMPLE)
             }
         }
     }
@@ -212,6 +235,48 @@ internal class FrameTelemetry(
             windowInBetween++
             if (reason == InBetweenReason.Warped) windowWarped++
             totalInBetweens[reason.ordinal]++
+            windowInBetweens[reason.ordinal]++
+        }
+    }
+
+    /** Records the interpolation mode, for the benchmark log. Any thread. */
+    fun setMode(newMode: InterpolationMode) {
+        mode = newMode
+    }
+
+    /**
+     * Starts a benchmark run that writes one row a second to [log] and times the stages on [StageProbeSchedule]'s
+     * schedule. Replaces any run already going.
+     */
+    fun startBench(log: BenchLog, nowNs: Long) {
+        synchronized(lock) {
+            bench?.close()
+            bench = log
+            benchStartNs = nowNs
+            probe = StageProbeSchedule(nowNs)
+            stageSamples.forEach { it.clear() }
+        }
+    }
+
+    fun stopBench() {
+        synchronized(lock) {
+            bench?.close()
+            bench = null
+            probe = null
+        }
+    }
+
+    /**
+     * True when the GL thread should time the stages of the frame arriving now. Only during a benchmark run's probe
+     * window, at most once a second. GL thread.
+     */
+    fun takeStageSample(nowNs: Long): Boolean = synchronized(lock) { probe?.takeSample(nowNs) ?: false }
+
+    /** Records the wall time, to glFinish, of one pipeline stage. GL thread. */
+    fun onStage(stage: PipelineStage, durationNs: Long) {
+        synchronized(lock) {
+            windowStageNs[stage.ordinal] = durationNs
+            stageSamples[stage.ordinal].add(durationNs)
         }
     }
 
@@ -270,6 +335,40 @@ internal class FrameTelemetry(
         }
     }
 
+    /** One benchmark row for the second that ends at [nowNs], from the window counters before they reset. */
+    private fun benchRow(nowNs: Long, stats: PlaybackStats, vitals: Vitals, probing: Boolean): String {
+        fun ms(ns: Long): String = if (ns == NO_SAMPLE) "" else "%.3f".format(java.util.Locale.ROOT, ns / NANOS_PER_MILLI)
+        return listOf(
+            "%.1f".format(java.util.Locale.ROOT, (nowNs - benchStartNs) / NANOS_PER_SECOND),
+            mode.name,
+            if (probing) "1" else "0",
+            "%.2f".format(java.util.Locale.ROOT, stats.displayFps),
+            "%.2f".format(java.util.Locale.ROOT, stats.contentFps),
+            windowRuns.toString(),
+            windowExactRuns.toString(),
+            totalDropped.toString(),
+            stats.avDrift?.let { (it.value / MICROS_PER_MILLI).toString() }.orEmpty(),
+            stats.drawCpuP95?.let { ms(it.value) }.orEmpty(),
+            ms(windowStageNs[PipelineStage.CopyAndLuma.ordinal]),
+            ms(windowStageNs[PipelineStage.Motion.ordinal]),
+            ms(windowStageNs[PipelineStage.Warp.ordinal]),
+            stats.thermalHeadroom?.let { "%.3f".format(java.util.Locale.ROOT, it) }.orEmpty(),
+            vitals.thermalStatus?.toString().orEmpty(),
+            vitals.batteryPercent?.toString().orEmpty(),
+            vitals.batteryCurrentMa?.toString().orEmpty(),
+            vitals.batteryTempC?.toString().orEmpty(),
+            vitals.charging?.let { if (it) "1" else "0" }.orEmpty(),
+            vitals.brightness?.toString().orEmpty(),
+            warpFallback?.name.orEmpty(),
+            windowInBetweens[InBetweenReason.Warped.ordinal].toString(),
+            windowInBetweens[InBetweenReason.SearchPending.ordinal].toString(),
+            windowInBetweens[InBetweenReason.NotSearched.ordinal].toString(),
+            windowInBetweens[InBetweenReason.LowConfidence.ordinal].toString(),
+            windowInBetweens[InBetweenReason.Held.ordinal].toString(),
+            totalSceneCuts.toString(),
+        ).joinToString(",")
+    }
+
     private fun csvRow(ptsUs: Micros, releaseNs: Long, rendered: Boolean): String = listOf(
         frameIndex.toString(),
         ptsUs.value.toString(),
@@ -285,13 +384,14 @@ internal class FrameTelemetry(
         if (rendered) "0" else "1",
     ).joinToString(",")
 
-    private fun snapshotLocked(nowNs: Long): PlaybackStats {
+    private fun snapshotLocked(nowNs: Long, vitals: Vitals): PlaybackStats {
         val elapsedSeconds = (nowNs - (windowStartNs ?: nowNs)).coerceAtLeast(1L) / NANOS_PER_SECOND
         val gpu = presentGpu.sorted()
         val motion = motionGpu.sorted()
         val draw = drawCpu.sorted()
         lastThermal = readThermalHeadroom()
-        return PlaybackStats(
+        val probing = probe?.inWindow(nowNs) ?: false
+        val stats = PlaybackStats(
             displayFps = (windowRendered / elapsedSeconds).toFloat(),
             contentFps = contentFps(windowRendered, windowFirstPtsUs, windowLastPtsUs),
             renderedFrames = totalRendered,
@@ -314,8 +414,30 @@ internal class FrameTelemetry(
             lastCutHistogram = lastCutHistogram,
             drawCpuP95 = percentile(draw, P95)?.let { Nanos(it) },
             statsPollMax = if (windowStatsPollMaxNs > 0L) Nanos(windowStatsPollMaxNs) else null,
+            benchPath = bench?.displayPath,
+            stageProbeOn = probing,
+            stageCopyP95 = stageP95(PipelineStage.CopyAndLuma),
+            stageMotionP95 = stageP95(PipelineStage.Motion),
+            stageWarpP95 = stageP95(PipelineStage.Warp),
+            batteryPercent = vitals.batteryPercent,
+            batteryCurrentMa = vitals.batteryCurrentMa,
+            batteryTempC = vitals.batteryTempC,
+            thermalStatus = vitals.thermalStatus,
         )
+        bench?.let { log ->
+            try {
+                log.row(benchRow(nowNs, stats, vitals, probing))
+            } catch (e: java.io.IOException) {
+                Log.w(TAG, "benchmark log write failed, run stopped", e)
+                bench = null
+                probe = null
+            }
+        }
+        return stats
     }
+
+    private fun stageP95(stage: PipelineStage): Nanos? =
+        percentile(stageSamples[stage.ordinal].sorted(), P95)?.let { Nanos(it) }
 
 
     private fun inBetweenCounts(): InBetweenCounts = InBetweenCounts(
@@ -347,6 +469,9 @@ internal class FrameTelemetry(
         const val RECENT_RELEASED = 16
         const val MIN_FRAME_GAP_US = 5_000L
         const val MAX_FRAME_GAP_US = 200_000L
+        const val NO_SAMPLE = -1L
+        const val NANOS_PER_MILLI = 1_000_000.0
+        const val MICROS_PER_MILLI = 1_000L
     }
 }
 
@@ -383,3 +508,15 @@ internal fun percentile(sorted: LongArray, fraction: Double): Long? {
 
 /** How one in-between refresh of the motion-compensated mode was drawn (see [InBetweenCounts]). */
 internal enum class InBetweenReason { Warped, SearchPending, NotSearched, LowConfidence, Held }
+
+/** The stages a benchmark run times with glFinish (see [StageProbeSchedule]). */
+internal enum class PipelineStage {
+    /** The OES copy into the ring and both motion-luma levels, once per arriving frame. */
+    CopyAndLuma,
+
+    /** The motion search, median and stats passes, once per pair. */
+    Motion,
+
+    /** One warped in-between draw. */
+    Warp,
+}

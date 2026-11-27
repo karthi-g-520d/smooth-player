@@ -65,4 +65,13 @@
     <string name="player_log_stop">Stop log</string>
     <string name="player_build">build %1$s</string>
     <string name="player_log_saved">Logging to %1$s</string>
+    <string name="player_bench_start">Bench</string>
+    <string name="player_bench_stop">Stop bench</string>
+    <string name="player_bench_saved">Bench log %1$s</string>
+    <string name="player_bench_stages">stages p95 copy %1$s · ME %2$s · warp %3$s%4$s</string>
+    <string name="player_bench_probing">" (timing now)"</string>
+    <string name="player_bench_vitals">battery %1$s · %2$s · %3$s · thermal status %4$s</string>
+    <string name="player_bench_percent">%1$d%%</string>
+    <string name="player_bench_ma">%1$d mA</string>
+    <string name="player_bench_temp">%1$.1f °C</string>
 </resources>

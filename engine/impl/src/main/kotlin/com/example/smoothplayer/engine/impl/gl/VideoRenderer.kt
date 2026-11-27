@@ -23,6 +23,7 @@ import com.example.smoothplayer.engine.impl.interp.WarpGovernor
 import com.example.smoothplayer.engine.impl.pacer.VsyncPacer
 import com.example.smoothplayer.engine.impl.telemetry.FrameTelemetry
 import com.example.smoothplayer.engine.impl.telemetry.InBetweenReason
+import com.example.smoothplayer.engine.impl.telemetry.PipelineStage
 import com.example.smoothplayer.engine.impl.telemetry.TraceNames
 import com.example.smoothplayer.engine.impl.telemetry.trace
 import com.example.smoothplayer.engine.impl.threading.GlThread
@@ -240,6 +241,9 @@ internal class VideoRenderer(
     // The newest ring slot whose motion is still to be estimated, and its pts so a recycled slot is not searched.
     private var pendingMotionSlot = NO_PENDING_SLOT
     private var pendingMotionPtsUs = EMPTY_SLOT_PTS_US
+    // A benchmark run's stage probe: the next search and the next warped draw are timed after a timed copy.
+    private var probeMotion = false
+    private var probeWarp = false
     @Volatile private var pacer: VsyncPacer? = null
     private var paced = false
     private val texMatrix = FloatArray(TEXTURE_MATRIX_SIZE)
@@ -520,6 +524,12 @@ internal class VideoRenderer(
         val frames = ringFor(width, height)
         val slot = frames.acquire(ptsUs)
         fields?.invalidate(slot)
+        val probing = telemetry.takeStageSample(System.nanoTime())
+        if (probing) {
+            probeMotion = true
+            probeWarp = true
+        }
+        val copyStartNs = if (probing) startTiming() else 0L
 
         trace(TraceNames.GL_COPY) {
             frames.attach(frames.frameTexture(slot), width, height)
@@ -544,6 +554,7 @@ internal class VideoRenderer(
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frames.lumaFineTexture(slot))
             drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = IDENTITY_4)
         }
+        if (probing) telemetry.onStage(PipelineStage.CopyAndLuma, finishTiming(copyStartNs))
 
         if (LUMA_PASSES_ENABLED && motionSearch != null) {
             pendingMotionSlot = slot
@@ -577,9 +588,13 @@ internal class VideoRenderer(
         pendingMotionSlot = NO_PENDING_SLOT
         val frames = ring ?: return
         if (frames.pts(slot) != pendingMotionPtsUs) return
-        // While the heat or GPU fallback holds frames, nothing reads the fields, so the search is skipped to spare the
-        // GPU. The motion views still need it.
-        if (mode == InterpolationMode.MotionCompensated && governor.holdsFrames && debugView == DebugView.Off) return
+        // Only the motion-compensated mode and the motion views read the fields. Duplicate and Blend skip the search, so
+        // Duplicate is a true 30 fps baseline for the Step 8 battery runs (with the search on, it drew about 370 mA on
+        // the vivo). While the heat or GPU fallback holds frames, nothing reads the fields either, so it is skipped then.
+        if (debugView == DebugView.Off) {
+            if (mode != InterpolationMode.MotionCompensated) return
+            if (governor.holdsFrames) return
+        }
         if (estimateMotion(frames, slot)) GLES30.glFlush()
     }
 
@@ -597,6 +612,9 @@ internal class VideoRenderer(
         val nextPts = frames.pts(slot)
         // Not a pair: the first frame, or the two sides of a seek.
         if (prevPts == EMPTY_SLOT_PTS_US || nextPts <= prevPts || nextPts - prevPts > MAX_BLEND_GAP_US) return false
+        val timed = probeMotion
+        probeMotion = false
+        val startNs = if (timed) startTiming() else 0L
         trace(TraceNames.INTERP_ME) {
             val pass = {
                 search.run(
@@ -615,6 +633,7 @@ internal class VideoRenderer(
             if (timers != null) timers.time(pass, telemetry::onMotionGpu) else pass()
             slotFields.markSearched(slot, prevPts, nextPts)
         }
+        if (timed) telemetry.onStage(PipelineStage.Motion, finishTiming(startNs))
         return true
     }
 
@@ -748,8 +767,13 @@ internal class VideoRenderer(
         val inBetween = pick.a != pick.b && pick.t > 0f
         if (inBetween) telemetry.onInBetweenDraw(inBetweenReason(decision))
         when {
-            decision == DRAW_WARP && inBetween ->
+            decision == DRAW_WARP && inBetween -> {
+                val timed = probeWarp
+                probeWarp = false
+                val startNs = if (timed) startTiming() else 0L
                 drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 1f, view = WARP_VIEW_PICTURE)
+                if (timed) telemetry.onStage(PipelineStage.Warp, finishTiming(startNs))
+            }
             // Still through the warp, at weight 0, so a scene cut holds its frame instead of blending two shots.
             decision == DRAW_LOW_CONFIDENCE && inBetween ->
                 drawWarp(frames, pick.a, pick.b, pick.t, rotation, weight = 0f, view = WARP_VIEW_PICTURE)
@@ -882,6 +906,23 @@ internal class VideoRenderer(
         drawFullScreenQuad(rotation = clockwiseRotation(rotation, rotationMatrix), uvMatrix = IDENTITY_4)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+    }
+
+    /**
+     * Drains the GPU and returns the start time of a timed stage. Only a benchmark run's stage probe calls this: the
+     * vivo's driver reports no timer queries around compute, so stages are timed by wall clock to glFinish instead.
+     */
+    @GlThread
+    private fun startTiming(): Long {
+        GLES30.glFinish()
+        return System.nanoTime()
+    }
+
+    /** Waits for the stage started at [startNs] to finish on the GPU and returns its wall time. */
+    @GlThread
+    private fun finishTiming(startNs: Long): Long {
+        GLES30.glFinish()
+        return System.nanoTime() - startNs
     }
 
     /** [frameA] and [frameB] mixed at [t]. The same texture twice, or t = 0, shows one frame unchanged. */

@@ -109,6 +109,13 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="@string/player_log_start" />
+
+            <Button
+                android:id="@+id/benchButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/player_bench_start" />
         </LinearLayout>
     </LinearLayout>
 </ScrollView>

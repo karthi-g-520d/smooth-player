@@ -19,6 +19,7 @@ import com.example.smoothplayer.engine.api.model.InBetweenCounts
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
 import com.example.smoothplayer.engine.api.model.Micros
+import com.example.smoothplayer.engine.api.model.Nanos
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.engine.api.model.WarpFallback
@@ -141,6 +142,7 @@ public class PlayerFragment(
     private fun renderStats(state: PlayerUiState) = with(binding) {
         statsButton.setText(if (state.statsVisible) R.string.player_stats_hide else R.string.player_stats_show)
         logButton.setText(if (state.loggingEnabled) R.string.player_log_stop else R.string.player_log_start)
+        benchButton.setText(if (state.benchRunning) R.string.player_bench_stop else R.string.player_bench_start)
         statsText.visibility = if (state.statsVisible) View.VISIBLE else View.GONE
         statsText.text = state.stats?.toOverlayText() ?: getString(R.string.player_stats_waiting)
     }
@@ -208,8 +210,26 @@ public class PlayerFragment(
             statsPollMax?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
         )
         val withWarp = warpText()?.let { "$text\n$cpu\n$it" } ?: "$text\n$cpu"
-        val withBuild = "$withWarp\n${getString(R.string.player_build, BuildConfig.BUILD_ID)}"
-        return logPath?.let { "$withBuild\n${getString(R.string.player_log_saved, it)}" } ?: withBuild
+        val withBench = "$withWarp\n${benchText()}"
+        val withBuild = "$withBench\n${getString(R.string.player_build, BuildConfig.BUILD_ID)}"
+        val withLog = logPath?.let { "$withBuild\n${getString(R.string.player_log_saved, it)}" } ?: withBuild
+        return benchPath?.let { "$withLog\n${getString(R.string.player_bench_saved, it)}" } ?: withLog
+    }
+
+    /** The benchmark's stage timings (only measured during a run) and the battery and heat readings. */
+    private fun PlaybackStats.benchText(): String {
+        fun ms(value: Nanos?): String = value?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) }
+            ?: notAvailable()
+        val probing = if (stageProbeOn) getString(R.string.player_bench_probing) else ""
+        val stages = getString(R.string.player_bench_stages, ms(stageCopyP95), ms(stageMotionP95), ms(stageWarpP95), probing)
+        val vitals = getString(
+            R.string.player_bench_vitals,
+            batteryPercent?.let { getString(R.string.player_bench_percent, it) } ?: notAvailable(),
+            batteryCurrentMa?.let { getString(R.string.player_bench_ma, it) } ?: notAvailable(),
+            batteryTempC?.let { getString(R.string.player_bench_temp, it) } ?: notAvailable(),
+            thermalStatus?.toString() ?: notAvailable(),
+        )
+        return "$stages\n$vitals"
     }
 
     /** The warp's fallback, share of warped in-betweens and scene cuts. Null outside the motion-compensated mode. */
@@ -268,6 +288,7 @@ public class PlayerFragment(
         playPauseButton.setOnClickListener { viewModel.onEvent(PlayerEvent.PlayPauseClicked) }
         statsButton.setOnClickListener { viewModel.onEvent(PlayerEvent.StatsToggled) }
         logButton.setOnClickListener { viewModel.onEvent(PlayerEvent.LoggingToggled) }
+        benchButton.setOnClickListener { viewModel.onEvent(PlayerEvent.BenchToggled) }
         modeButton.setOnClickListener { viewModel.onEvent(PlayerEvent.InterpolationToggled) }
         viewButton.setOnClickListener { viewModel.onEvent(PlayerEvent.DebugViewCycled) }
         fullscreenButton.setOnClickListener { viewModel.onEvent(PlayerEvent.FullscreenToggled) }

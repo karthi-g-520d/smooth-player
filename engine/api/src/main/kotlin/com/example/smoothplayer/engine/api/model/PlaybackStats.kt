@@ -5,6 +5,7 @@ package com.example.smoothplayer.engine.api.model
  *
  * @property avDrift video PTS minus the audio clock for the last frame shown. Null without an audio track.
  * @property logPath the CSV file being written, or null when logging is off.
+ * @property benchPath the benchmark CSV being written, or null when no benchmark run is on.
  */
 public data class PlaybackStats(
     val displayFps: Float = 0f,
@@ -40,4 +41,21 @@ public data class PlaybackStats(
     val drawCpuP95: Nanos? = null,
     /** The longest poll of a pair's stats over the last second. Null when no stats were polled. */
     val statsPollMax: Nanos? = null,
+    val benchPath: String? = null,
+    /** True while a benchmark run is timing the stages, which waits for the GPU and so costs cadence. */
+    val stageProbeOn: Boolean = false,
+    /** Wall time, to glFinish, of the copy and motion-luma passes for one arriving frame. p95 of recent samples. */
+    val stageCopyP95: Nanos? = null,
+    /** Wall time, to glFinish, of the motion search and stats passes for one pair. p95 of recent samples. */
+    val stageMotionP95: Nanos? = null,
+    /** Wall time, to glFinish, of one warped in-between draw. p95 of recent samples. */
+    val stageWarpP95: Nanos? = null,
+    /** Battery charge, 0 to 100. Null when unknown. */
+    val batteryPercent: Int? = null,
+    /** Battery current in mA as the device reports it (the sign convention varies by device). Null when unknown. */
+    val batteryCurrentMa: Int? = null,
+    /** Battery temperature in °C. Null when unknown. */
+    val batteryTempC: Float? = null,
+    /** PowerManager thermal status, 0 (none) to 6 (shutdown). Null before Android 10. */
+    val thermalStatus: Int? = null,
 )
