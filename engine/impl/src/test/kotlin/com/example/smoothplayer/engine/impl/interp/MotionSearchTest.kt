@@ -35,6 +35,36 @@ private fun texture(x: Int, y: Int): Int {
     return (top * (CELL - fy) + bottom * fy) / (CELL * CELL)
 }
 
+/** Source pixels per motion-luma pixel for 1080p (see motionLumaDivisor), and the plan's synthetic pan speed. */
+private const val LUMA_DIVISOR_1080P = 6
+private const val PAN_SOURCE_PX = 4
+/** The plan's bar is 0.5 px at 1/4 resolution, which is 2 source pixels. */
+private const val PLAN_BAR_SOURCE_PX = PLAN_BAR_PX * 4
+private const val SOURCE_CELL = CELL * LUMA_DIVISOR_1080P
+
+/** [texture] at source scale: the same lattice, [LUMA_DIVISOR_1080P] times larger. */
+private fun sourceTexture(x: Int, y: Int): Int {
+    val cx = Math.floorDiv(x, SOURCE_CELL)
+    val cy = Math.floorDiv(y, SOURCE_CELL)
+    val fx = Math.floorMod(x, SOURCE_CELL).toLong()
+    val fy = Math.floorMod(y, SOURCE_CELL).toLong()
+    val top = lattice(cx, cy) * (SOURCE_CELL - fx) + lattice(cx + 1, cy) * fx
+    val bottom = lattice(cx, cy + 1) * (SOURCE_CELL - fx) + lattice(cx + 1, cy + 1) * fx
+    return ((top * (SOURCE_CELL - fy) + bottom * fy) / (SOURCE_CELL * SOURCE_CELL)).toInt()
+}
+
+/** Motion luma the way the renderer makes it: each pixel the rounded mean of a divisor-sized block of the source. */
+private fun lumaOfSource(shiftX: Int): LumaPlane = plane { x, y ->
+    var sum = 0
+    for (sy in 0 until LUMA_DIVISOR_1080P) {
+        for (sx in 0 until LUMA_DIVISOR_1080P) {
+            sum += sourceTexture(x * LUMA_DIVISOR_1080P + sx - shiftX, y * LUMA_DIVISOR_1080P + sy)
+        }
+    }
+    val count = LUMA_DIVISOR_1080P * LUMA_DIVISOR_1080P
+    (sum + count / 2) / count
+}
+
 private fun plane(sample: (Int, Int) -> Int): LumaPlane =
     LumaPlane(PLANE_WIDTH, PLANE_HEIGHT, IntArray(PLANE_WIDTH * PLANE_HEIGHT) { i -> sample(i % PLANE_WIDTH, i / PLANE_WIDTH) })
 
@@ -144,6 +174,29 @@ class MotionSearchTest {
         val sorted = errors.sorted()
         assertTrue("median error ${sorted[sorted.size / 2]} px", sorted[sorted.size / 2] < MEDIAN_BAR_PX)
         assertTrue("worst error ${sorted.last()} px", sorted.last() < PLAN_BAR_PX)
+    }
+
+    @Test
+    fun `the plan's synthetic pan, 4 source px per frame at 1080p, stays within half a pixel at quarter resolution`() {
+        // At 1080p the motion luma is 1/6, so the true vector is 4 / 6 of a luma pixel: a subpixel-only motion.
+        val prev = lumaOfSource(shiftX = 0)
+        val next = lumaOfSource(shiftX = PAN_SOURCE_PX)
+
+        val field = estimateMotion(prev, next)
+
+        val errors = mutableListOf<Double>()
+        for (by in 0 until field.rows) {
+            for (bx in 0 until field.columns) {
+                if (!isInterior(bx, by, field.columns, field.rows)) continue
+                val index = by * field.columns + bx
+                val sourceX = (field.dx[index] + field.subX[index]).toDouble() * LUMA_DIVISOR_1080P
+                val sourceY = (field.dy[index] + field.subY[index]).toDouble() * LUMA_DIVISOR_1080P
+                errors.add(Math.hypot(sourceX - PAN_SOURCE_PX, sourceY))
+            }
+        }
+        val sorted = errors.sorted()
+        // Measured with this code: median 0.50, p90 0.63, worst 0.73 source px. The bar is 2.
+        assertTrue("median error ${sorted[sorted.size / 2]} source px", sorted[sorted.size / 2] < PLAN_BAR_SOURCE_PX)
     }
 
     @Test

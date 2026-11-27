@@ -1,5 +1,6 @@
 package com.example.smoothplayer.feature.player.playback
 
+import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.EngineState
 import com.example.smoothplayer.engine.api.model.InterpolationMode
@@ -93,6 +94,15 @@ class PlayerReducerTest {
         val blend = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.InterpolationToggled)
         assertEquals(InterpolationMode.Blend, blend.interpolation)
         assertEquals(InterpolationMode.Duplicate, PlayerReducer.reduce(blend, PlayerEvent.InterpolationToggled).interpolation)
+    }
+
+    @Test
+    fun `the view button steps from normal to motion vectors to match error and back`() {
+        val motion = PlayerReducer.reduce(PlayerUiState(), PlayerEvent.DebugViewCycled)
+        assertEquals(DebugView.MotionVectors, motion.debugView)
+        val error = PlayerReducer.reduce(motion, PlayerEvent.DebugViewCycled)
+        assertEquals(DebugView.MatchError, error.debugView)
+        assertEquals(DebugView.Off, PlayerReducer.reduce(error, PlayerEvent.DebugViewCycled).debugView)
     }
 
     @Test

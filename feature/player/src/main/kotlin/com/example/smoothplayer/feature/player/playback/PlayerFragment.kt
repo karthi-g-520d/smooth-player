@@ -13,6 +13,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.example.smoothplayer.engine.api.model.DebugView
 import com.example.smoothplayer.engine.api.model.EngineError
 import com.example.smoothplayer.engine.api.model.InterpolationMode
 import com.example.smoothplayer.engine.api.model.MICROS_PER_SECOND
@@ -122,6 +123,13 @@ public class PlayerFragment(
                 R.string.player_mode_duplicate
             },
         )
+        viewButton.setText(
+            when (state.debugView) {
+                DebugView.Off -> R.string.player_view_normal
+                DebugView.MotionVectors -> R.string.player_view_motion
+                DebugView.MatchError -> R.string.player_view_match_error
+            },
+        )
         renderFullscreen(state.fullscreen)
     }
 
@@ -133,7 +141,7 @@ public class PlayerFragment(
     }
 
     /**
-     * Full screen keeps the picture and the transport (seek, play, mode) and hides the file button, the info line
+     * Full screen keeps the picture and the transport (seek, play, mode, view) and hides the file button, the info line
      * and the stats row. The picture then takes the height that is left.
      */
     private fun renderFullscreen(fullscreen: Boolean) {
@@ -215,6 +223,7 @@ public class PlayerFragment(
         statsButton.setOnClickListener { viewModel.onEvent(PlayerEvent.StatsToggled) }
         logButton.setOnClickListener { viewModel.onEvent(PlayerEvent.LoggingToggled) }
         modeButton.setOnClickListener { viewModel.onEvent(PlayerEvent.InterpolationToggled) }
+        viewButton.setOnClickListener { viewModel.onEvent(PlayerEvent.DebugViewCycled) }
         fullscreenButton.setOnClickListener { viewModel.onEvent(PlayerEvent.FullscreenToggled) }
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) = Unit

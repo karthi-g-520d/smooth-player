@@ -53,6 +53,12 @@ internal class GpuMotionSearch private constructor(
     var rows: Int = 0
         private set
 
+    /** Motion-luma pixels per block side. */
+    val blockSize: Int get() = BLOCK_SIZE
+
+    /** The largest vector the search can return, per axis, in motion-luma pixels. */
+    val maxVector: Int get() = CONFIG.maxVector
+
     /** RGBA16F, one texel per block: the total vector in luma pixels in x and y, the residual in z. 0 before [run]. */
     var motionTexture: Int = 0
         private set
