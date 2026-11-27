@@ -63,5 +63,6 @@
     <string name="player_fullscreen_exit">Exit fullscreen</string>
     <string name="player_log_start">Log CSV</string>
     <string name="player_log_stop">Stop log</string>
+    <string name="player_build">build %1$s</string>
     <string name="player_log_saved">Logging to %1$s</string>
 </resources>

@@ -10,10 +10,13 @@ android {
 
     defaultConfig {
         minSdk = 26
+        // The commit CI built from (see ci.yml), shown on the overlay so a phone test can tell builds apart.
+        buildConfigField("String", "BUILD_ID", "\"${System.getenv("BUILD_ID") ?: "local"}\"")
     }
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     compileOptions {

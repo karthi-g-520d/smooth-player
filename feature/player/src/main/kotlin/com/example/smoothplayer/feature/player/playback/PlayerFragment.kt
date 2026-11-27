@@ -22,6 +22,7 @@ import com.example.smoothplayer.engine.api.model.Micros
 import com.example.smoothplayer.engine.api.model.PlaybackStats
 import com.example.smoothplayer.engine.api.model.VideoInfo
 import com.example.smoothplayer.engine.api.model.WarpFallback
+import com.example.smoothplayer.feature.player.BuildConfig
 import com.example.smoothplayer.feature.player.R
 import com.example.smoothplayer.feature.player.databinding.FragmentPlayerBinding
 import kotlinx.coroutines.launch
@@ -207,7 +208,8 @@ public class PlayerFragment(
             statsPollMax?.let { getString(R.string.player_stats_gpu, it.value / NANOS_PER_MILLI) } ?: notAvailable(),
         )
         val withWarp = warpText()?.let { "$text\n$cpu\n$it" } ?: "$text\n$cpu"
-        return logPath?.let { "$withWarp\n${getString(R.string.player_log_saved, it)}" } ?: withWarp
+        val withBuild = "$withWarp\n${getString(R.string.player_build, BuildConfig.BUILD_ID)}"
+        return logPath?.let { "$withBuild\n${getString(R.string.player_log_saved, it)}" } ?: withBuild
     }
 
     /** The warp's fallback, share of warped in-betweens and scene cuts. Null outside the motion-compensated mode. */
