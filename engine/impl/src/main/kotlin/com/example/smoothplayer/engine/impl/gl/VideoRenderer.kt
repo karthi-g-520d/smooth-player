@@ -54,6 +54,7 @@ private const val ROTATION_MATRIX_SIZE = 4
 private const val QUAD_HALF_EXTENT = 1f
 private const val NANOS_PER_MICRO = 1_000L
 private const val TARGET_REFRESH_HZ = 60f
+private const val NO_PENDING_SLOT = -1
 
 /**
  * Diagnostic switch for the GPU present timer. Turning it off removes the per-draw timer query and its
@@ -77,6 +78,13 @@ internal const val LUMA_PASSES_ENABLED = true
  * at 320x180 (see [motionLumaDivisor]), where the search measured about 4 ms.
  */
 internal const val MOTION_SEARCH_ENABLED = false
+
+/**
+ * Diagnostic switch for the GPU timer around motion estimation. Off, because on the vivo V2334 (MediaTek) the timer
+ * query around compute never returns, and the timer ring then reuses queries the driver still holds. Turn it on only on
+ * a device whose driver reports compute timings.
+ */
+internal const val MOTION_GPU_TIMER_ENABLED = false
 
 /**
  * Diagnostic switch for the present draw. When on, each vsync still clears and swaps the window, but skips the blend
@@ -112,7 +120,8 @@ private val IDENTITY_4 = floatArrayOf(
  * [SurfaceTexture] for the decoder to write into, and an optional window surface to draw into.
  *
  * Each arriving frame is copied out of the OES texture into a [FrameRing] slot, with its motion luma at two levels
- * (see [FrameRing]), and its motion from the frame before is estimated on that luma.
+ * (see [FrameRing]). Its motion from the frame before is estimated on that luma straight after the next swap, so the
+ * search never sits in the GPU queue ahead of a present (see [runPendingMotion]).
  * On every vsync the window is drawn from the ring: the newest frame in [InterpolationMode.Duplicate], or the two
  * frames around the screen's content time in [InterpolationMode.Blend].
  *
@@ -162,6 +171,9 @@ internal class VideoRenderer(
     private var gpuTimers: GpuTimerRing? = null
     private var motionSearch: GpuMotionSearch? = null
     private var motionTimers: GpuTimerRing? = null
+    // The newest ring slot whose motion is still to be estimated, and its pts so a recycled slot is not searched.
+    private var pendingMotionSlot = NO_PENDING_SLOT
+    private var pendingMotionPtsUs = EMPTY_SLOT_PTS_US
     @Volatile private var pacer: VsyncPacer? = null
     private var paced = false
     private val texMatrix = FloatArray(TEXTURE_MATRIX_SIZE)
@@ -336,7 +348,7 @@ internal class VideoRenderer(
             createVertexState()
             gpuTimers = if (GPU_TIMERS_ENABLED) GpuTimerRing.createIfSupported() else null
             motionSearch = if (MOTION_SEARCH_ENABLED && LUMA_PASSES_ENABLED) createMotionSearch() else null
-            motionTimers = if (GPU_TIMERS_ENABLED && motionSearch != null) GpuTimerRing.createIfSupported() else null
+            motionTimers = if (MOTION_GPU_TIMER_ENABLED && motionSearch != null) GpuTimerRing.createIfSupported() else null
             pacer = VsyncPacer(handler) { presentNs, periodNs -> onVsync(presentNs, periodNs) }
         } catch (e: Exception) {
             // Reported to the decoder thread by awaitFrameSurface, instead of crashing the GL thread.
@@ -445,19 +457,40 @@ internal class VideoRenderer(
             drawFullScreenQuad(rotation = IDENTITY_2, uvMatrix = IDENTITY_4)
         }
 
-        if (LUMA_PASSES_ENABLED) estimateMotion(frames, slot)
+        if (LUMA_PASSES_ENABLED && motionSearch != null) {
+            // Deferred to just after the next swap. Frames arrive shortly before the vsync that shows them, so a search
+            // queued here would sit on the GPU ahead of that vsync's draw and delay the present.
+            pendingMotionSlot = slot
+            pendingMotionPtsUs = ptsUs
+        }
+    }
+
+    /**
+     * Estimates the motion of the newest arrived frame, if any is waiting. Called straight after a swap, so the search
+     * gets the GPU for the rest of the refresh period, and flushed so it starts now instead of being batched in front
+     * of the next draw. When two frames arrive between swaps only the newer pair is searched, since the field holds
+     * one pair anyway.
+     */
+    @GlThread
+    private fun runPendingMotion() {
+        val slot = pendingMotionSlot
+        if (slot == NO_PENDING_SLOT) return
+        pendingMotionSlot = NO_PENDING_SLOT
+        val frames = ring ?: return
+        if (frames.pts(slot) != pendingMotionPtsUs) return
+        if (estimateMotion(frames, slot)) GLES30.glFlush()
     }
 
     /**
      * Matches [slot]'s luma against the frame before it, coarse to fine on the two motion-luma levels. Runs once per
      * arriving frame, so the vectors of a pair serve every refresh between the two frames. The vectors are in fine
-     * motion-luma pixels: multiply by [FrameRing.motionLumaDivisor] for source pixels.
+     * motion-luma pixels: multiply by [FrameRing.motionLumaDivisor] for source pixels. False when nothing was searched.
      */
     @GlThread
-    private fun estimateMotion(frames: FrameRing, slot: Int) {
-        val search = motionSearch ?: return
+    private fun estimateMotion(frames: FrameRing, slot: Int): Boolean {
+        val search = motionSearch ?: return false
         val previous = frames.previous(slot)
-        if (frames.pts(previous) == EMPTY_SLOT_PTS_US) return
+        if (frames.pts(previous) == EMPTY_SLOT_PTS_US) return false
         trace(TraceNames.INTERP_ME) {
             val pass = {
                 search.run(
@@ -472,6 +505,7 @@ internal class VideoRenderer(
             val timers = motionTimers
             if (timers != null) timers.time(pass, telemetry::onMotionGpu) else pass()
         }
+        return true
     }
 
     /** The ring for this content size. Replaced when the size changes, for example when a new file is opened. */
@@ -480,6 +514,7 @@ internal class VideoRenderer(
         val current = ring
         if (current != null && current.width == width && current.height == height) return current
         current?.close()
+        pendingMotionSlot = NO_PENDING_SLOT
         return FrameRing(width, height).also { ring = it }
     }
 
@@ -514,6 +549,7 @@ internal class VideoRenderer(
         }
 
         trace(TraceNames.GL_SWAP) { eglCore.swapBuffers(target, presentNs) }
+        runPendingMotion()
     }
 
     @GlThread
